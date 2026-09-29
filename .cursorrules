@@ -1,0 +1,32 @@
+# Horizonte ERP — Logística Integrada
+
+## Stack
+- Vite + React 19 + TypeScript (strict mode) + Tailwind CSS
+- Supabase (Postgres + Auth + Realtime)
+- Deploy: Vercel (frontend) + Vercel Functions (middleware futuro)
+- Ambiente: Windows, PowerShell, porta 3000
+
+## Arquivos-chave
+- src/types.ts → contratos de dados, fonte da verdade
+- src/services/api/ → funções de acesso ao Supabase
+- src/hooks/ → hooks React por módulo
+- src/components/auth/LoginScreen.tsx → autenticação
+
+## Status dos módulos
+- ✅ Auth → Supabase Auth funcionando, 3 perfis
+- ✅ Frota → migrado para Supabase com Realtime
+- ✅ Equipes → migrado para Supabase
+- ⏳ Monitoramento → ainda em mock
+
+## Perfis de acesso
+- analista → operacional
+- supervisor → operacional + aprovações
+- gerencia → visão completa
+
+## Regras obrigatórias
+- TypeScript strict, sem any
+- Campos ausentes → null no tipo, "Não informado" na UI
+- Nunca usar mock data hardcoded
+- Canal Supabase Realtime → nome único por assinatura
+- npm install usa --legacy-peer-deps
+- Sempre responder em português

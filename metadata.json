@@ -1,0 +1,6 @@
+{
+  "name": "Horizonte Logística ERP",
+  "description": "Sistema ERP e Torre de Controle Operacional da Horizonte Logística com gestão de frotas, entregas e telemetria em tempo real.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
