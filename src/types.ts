@@ -316,7 +316,12 @@ export interface TourTMLUpdate {
 
 // ── DELIVERY (PARADA / POC) ──────────────────────────────────
 
-export type DeliveryStatus = string;
+export type DeliveryStatus = 
+  | 'PENDING'
+  | 'CONCLUDED'
+  | 'RESCHEDULED'
+  | 'DEFINITELY_RETURNED'
+  | 'PARTIAL_DELIVERY';
 
 export interface Delivery {
   id: string;
@@ -351,7 +356,7 @@ export type DeliveryInsert = Omit<Delivery, 'id' | 'created_at' | 'updated_at'>;
 
 // ── DEVOLUTION (DEVOLUÇÃO) ───────────────────────────────────
 
-export type DevolutionStatus = string;
+export type DevolutionStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 
 export interface Devolution {
   id: string;
