@@ -1,172 +1,255 @@
-import React, { useState } from 'react';
-import { ReturnItem } from '../../types';
-import { OperationalStorage } from '../../services/storageService';
-import { usePersistedList } from '../../hooks/usePersistedList';
+import React, { useState, useRef } from 'react';
+import { useDevolutions } from '../../hooks/useTours';
+import { useAuth } from '../../hooks/useAuth';
 import { useToast } from '../../hooks/useToast';
-import { downloadFile, toCsv } from '../../utils/csv';
+import { orDash } from '../../utils/format';
+import { importBeesRoutes, type ImportBeesResult } from '../../services/importBeesRoutes';
 import { TangramCard } from '../tangram/TangramCard';
 import { TangramBadge } from '../tangram/TangramBadge';
-import { TangramButton } from '../tangram/TangramButton';
+import type { Devolution, DevolutionApproval } from '../../types';
 import {
   RotateCcw,
   CheckCircle2,
-  AlertTriangle,
-  FileText,
-  Warehouse,
+  XCircle,
   Search,
-  Truck,
-  DollarSign,
+  Clock,
   ClipboardCheck,
   X,
+  AlertTriangle,
+  Upload,
+  FileText,
 } from 'lucide-react';
 
+function devolutionStatusBadge(status: string) {
+  switch (status) {
+    case 'APPROVED': return <TangramBadge variant="success">Aprovada</TangramBadge>;
+    case 'REJECTED': return <TangramBadge variant="danger">Rejeitada</TangramBadge>;
+    default:         return <TangramBadge variant="warning">Pendente</TangramBadge>;
+  }
+}
+
 export const GestaoDevolucaoScreen: React.FC = () => {
-  const [returns, setReturns] = usePersistedList<ReturnItem>(
-    OperationalStorage.getReturns,
-    OperationalStorage.setReturns
-  );
+  const [statusFilter, setStatusFilter] = useState('todos');
   const [searchQuery, setSearchQuery] = useState('');
-  const [reasonFilter, setReasonFilter] = useState('todos');
-  const [selectedReturnForInspection, setSelectedReturnForInspection] = useState<ReturnItem | null>(null);
-  const [actionSuccessMsg, showToast] = useToast(4000);
+  const [approvalModal, setApprovalModal] = useState<Devolution | null>(null);
+  const [supervisorComment, setSupervisorComment] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<ImportBeesResult | null>(null);
+  const [toast, showToast] = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Inspector form
-  const [inspectorName, setInspectorName] = useState('');
-  const [inspectionDecision, setInspectionDecision] = useState<'Estornado ao Estoque' | 'Destinado a Seguradora'>('Estornado ao Estoque');
-  const [inspectionNotes, setInspectionNotes] = useState('');
+  const { devolutions, pending, loading, error, approve, reload } = useDevolutions();
+  const { session, profile } = useAuth();
 
-  const filteredReturns = returns.filter((item) => {
-    const matchesSearch =
-      item.returnCode.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.nfeNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.clientName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.vehiclePlate.toLowerCase().includes(searchQuery.toLowerCase());
+  const isSupervisorOrAbove =
+    profile?.role === 'supervisor' || profile?.role === 'gerencia';
 
-    if (reasonFilter === 'todos') return matchesSearch;
-    return matchesSearch && item.reason === reasonFilter;
-  });
+  const filtered = devolutions.filter((d) => {
+  const matchesSearch =
+    !searchQuery ||
+    (d.poc_name ?? '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (d.reason ?? '').toLowerCase().includes(searchQuery.toLowerCase());
+  const matchesStatus = statusFilter === 'todos' || d.status === statusFilter;
+  return matchesSearch && matchesStatus;
+});
 
-  const deliveriesTotal = OperationalStorage.getDeliveries().length;
-  const totalValue = returns.reduce((acc, r) => acc + r.totalValue, 0);
+  // ── Importação CSV ───────────────────────────────────────────
 
-  const handleCompleteInspection = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedReturnForInspection) return;
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-    setReturns((prev) =>
-      prev.map((r) =>
-        r.id === selectedReturnForInspection.id
-          ? {
-              ...r,
-              warehouseStatus: inspectionDecision,
-              checkedBy: inspectorName,
-              notes: inspectionNotes || r.notes,
-            }
-          : r
-      )
-    );
+    setImporting(true);
+    setImportResult(null);
 
-    showToast(
-      inspectionDecision === 'Estornado ao Estoque'
-        ? `Devolução ${selectedReturnForInspection.returnCode} estornada com sucesso e registrada como estornada ao estoque.`
-        : `Devolução ${selectedReturnForInspection.returnCode} direcionada para sinistro da seguradora.`
-    );
-    setSelectedReturnForInspection(null);
-    setInspectionNotes('');
+    try {
+      const text = await file.text();
+      const result = await importBeesRoutes(text);
+      setImportResult(result);
+
+      if (result.errors.length === 0) {
+        showToast(
+          `Importado: ${result.toursUpserted} mapas, ${result.deliveriesUpserted} entregas, ${result.devolutionsCreated} devoluções criadas.`
+        );
+        void reload();
+      } else {
+        showToast(`Importado com avisos. Verifique o relatório.`);
+        void reload();
+      }
+    } catch (err) {
+      showToast('Erro ao processar o arquivo. Verifique o formato.');
+    } finally {
+      setImporting(false);
+      // Limpa o input para permitir reimportar o mesmo arquivo
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  // ── Aprovação ────────────────────────────────────────────────
+
+  const openApprovalModal = (dev: Devolution) => {
+    setApprovalModal(dev);
+    setSupervisorComment('');
+  };
+
+  const closeApprovalModal = () => {
+    setApprovalModal(null);
+    setSupervisorComment('');
+  };
+
+  const handleApprove = async (decision: 'APPROVED' | 'REJECTED') => {
+    if (!approvalModal || !session?.user) return;
+    setSaving(true);
+    try {
+      const approval: DevolutionApproval = {
+        status: decision,
+        supervisor_comments: supervisorComment || undefined,
+      };
+      await approve(approvalModal.id, approval, session.user.id);
+      showToast(decision === 'APPROVED' ? 'Devolução aprovada.' : 'Devolução rejeitada.');
+      closeApprovalModal();
+    } catch {
+      showToast('Erro ao processar. Tente novamente.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div className="space-y-6">
       {/* Toast */}
-      {actionSuccessMsg && (
+      {toast && (
         <div className="fixed bottom-6 right-6 z-50 bg-[#006C49] text-white px-4 py-3 rounded-xl shadow-xl flex items-center gap-2.5 text-xs font-semibold animate-in fade-in slide-in-from-bottom-2">
           <CheckCircle2 className="w-4 h-4" />
-          <span>{actionSuccessMsg}</span>
+          <span>{toast}</span>
         </div>
       )}
 
-      {/* Screen Header */}
+      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-[#EFF6FF] text-[#1E2D72] border border-[#BFDBFE]">
-              Horizonte Reversa
-            </span>
             <h1 className="text-xl sm:text-2xl font-black text-[#1E2D72] tracking-tight">
-              Gestão de Devoluções & Logística Reversa
+              Gestão de Devolução
             </h1>
           </div>
           <p className="text-xs sm:text-sm text-[#64748B] mt-1">
-            Operações Horizonte Logística • Controle de mercadorias recusadas, retorno aos CDs e estorno contábil.
+            Devoluções pendentes de aprovação • Fluxo supervisor
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        {/* Botão de importação */}
+        <div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv"
+            className="hidden"
+            onChange={(e) => { void handleFileSelect(e); }}
+          />
           <button
-            onClick={() =>
-              downloadFile(
-                `devolucoes_${new Date().toISOString().slice(0, 10)}.csv`,
-                toCsv(
-                  ['Código', 'NFe', 'CTe', 'Cliente', 'Cidade', 'Motorista', 'Placa', 'Itens', 'Volumes', 'Valor', 'Motivo', 'Status', 'Conferente'],
-                  returns.map((r) => [r.returnCode, r.nfeNumber, r.cteNumber, r.clientName, r.city, r.driverName, r.vehiclePlate, r.itemsDescription, r.volumeUnits, r.totalValue, r.reason, r.warehouseStatus, r.checkedBy])
-                )
-              )
-            }
-            className="text-xs font-bold text-[#004AC6] hover:bg-[#EFF4FF] border border-[#BFDBFE] px-3 py-1.5 rounded-lg transition-colors cursor-pointer"
+            type="button"
+            disabled={importing}
+            onClick={() => fileInputRef.current?.click()}
+            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold bg-[#1E2D72] hover:bg-[#162260] text-white rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-60"
           >
-            Exportar Devoluções (CSV)
+            <Upload className="w-3.5 h-3.5" />
+            {importing ? 'Importando...' : 'Importar CSV do BEES'}
           </button>
         </div>
       </div>
 
-      {/* Metric Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+      {/* Resultado da importação */}
+      {importResult && (
+        <div className={`rounded-xl border p-4 text-xs ${
+          importResult.errors.length > 0
+            ? 'bg-amber-50 border-amber-200'
+            : 'bg-emerald-50 border-emerald-200'
+        }`}>
+          <div className="flex items-start gap-3">
+            <FileText className={`w-4 h-4 mt-0.5 shrink-0 ${
+              importResult.errors.length > 0 ? 'text-amber-600' : 'text-emerald-600'
+            }`} />
+            <div className="flex-1">
+              <div className="font-bold text-[#0B1C30] mb-1">Resultado da importação</div>
+              <div className="flex flex-wrap gap-4 text-[11px]">
+                <span>✅ <strong>{importResult.toursUpserted}</strong> mapas</span>
+                <span>✅ <strong>{importResult.deliveriesUpserted}</strong> entregas</span>
+                <span>🔄 <strong>{importResult.devolutionsCreated}</strong> devoluções criadas</span>
+                {importResult.skipped > 0 && (
+                  <span>⚠️ <strong>{importResult.skipped}</strong> linhas ignoradas</span>
+                )}
+              </div>
+              {importResult.errors.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {importResult.errors.map((e, i) => (
+                    <div key={i} className="text-rose-700 text-[11px]">• {e}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => setImportResult(null)}
+              className="text-slate-400 hover:text-slate-600"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
         <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-[#E2E8F0] shadow-xs">
           <div className="flex items-center justify-between text-[#737686] text-xs font-semibold mb-1">
-            <span>Taxa Geral de Devolução</span>
+            <span>Total de Devoluções</span>
             <RotateCcw className="w-4 h-4 text-[#004AC6]" />
           </div>
-          <div className="text-xl sm:text-2xl font-black text-[#0B1C30]">{deliveriesTotal > 0 ? `${((returns.length / deliveriesTotal) * 100).toFixed(2)}%` : '—'}</div>
-          <div className="text-[11px] text-slate-500 mt-0.5">Devoluções ÷ entregas cadastradas</div>
+          <div className="text-xl sm:text-2xl font-black text-[#0B1C30]">{devolutions.length}</div>
+          <div className="text-[11px] text-slate-500 mt-0.5">todos os registros</div>
         </div>
 
         <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-[#E2E8F0] shadow-xs">
           <div className="flex items-center justify-between text-[#737686] text-xs font-semibold mb-1">
-            <span>Valor Retido em Devolução</span>
-            <DollarSign className="w-4 h-4 text-[#D97706]" />
+            <span>Pendentes Aprovação</span>
+            <Clock className="w-4 h-4 text-[#F39818]" />
           </div>
-          <div className="text-xl sm:text-2xl font-black text-[#D97706]">
-            R$ {totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+          <div className="text-xl sm:text-2xl font-black text-[#F39818]">{pending.length}</div>
+          <div className={`text-[11px] font-semibold mt-0.5 ${pending.length > 0 ? 'text-amber-600' : 'text-slate-500'}`}>
+            {pending.length > 0 ? 'Aguardando supervisor' : 'Nenhuma pendente'}
           </div>
-          <div className="text-[11px] text-slate-500 mt-0.5">{returns.length} notas em trâmite</div>
         </div>
 
         <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-[#E2E8F0] shadow-xs">
           <div className="flex items-center justify-between text-[#737686] text-xs font-semibold mb-1">
-            <span>Retornando ao CD</span>
-            <Truck className="w-4 h-4 text-[#2563EB]" />
+            <span>Aprovadas</span>
+            <CheckCircle2 className="w-4 h-4 text-[#006C49]" />
           </div>
-          <div className="text-xl sm:text-2xl font-black text-[#2563EB]">
-            {returns.filter((r) => r.warehouseStatus === 'A Caminho do CD').length}
+          <div className="text-xl sm:text-2xl font-black text-[#006C49]">
+            {devolutions.filter((d) => d.status === 'APPROVED').length}
           </div>
-          <div className="text-[11px] text-slate-500 mt-0.5">Veículos em rota de volta</div>
-        </div>
-
-        <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-[#E2E8F0] shadow-xs">
-          <div className="flex items-center justify-between text-[#737686] text-xs font-semibold mb-1">
-            <span>Aguardando Laudo no CD</span>
-            <Warehouse className="w-4 h-4 text-[#DC2626]" />
-          </div>
-          <div className="text-xl sm:text-2xl font-black text-[#DC2626]">
-            {returns.filter((r) => r.warehouseStatus === 'Em Conferência no Pátio').length}
-          </div>
-          <div className="text-[11px] text-rose-600 font-semibold mt-0.5">Requer conferência física</div>
+          <div className="text-[11px] text-slate-500 mt-0.5">pelo supervisor</div>
         </div>
       </div>
 
-      {/* Main Table Card */}
+      {/* Alerta de pendentes para supervisor */}
+      {isSupervisorOrAbove && pending.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div>
+            <div className="text-sm font-bold text-amber-800">
+              {pending.length} devolução{pending.length > 1 ? 'ões' : ''} aguardando sua aprovação
+            </div>
+            <div className="text-xs text-amber-700 mt-0.5">
+              Use o botão "Analisar" na tabela abaixo para aprovar ou rejeitar.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tabela */}
       <TangramCard>
-        {/* Filters */}
         <div className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-[#F1F5F9]">
           <div className="relative flex-1 max-w-md">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#737686]" />
@@ -174,239 +257,174 @@ export const GestaoDevolucaoScreen: React.FC = () => {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Buscar por código, NFe, cliente ou placa..."
-              className="w-full pl-9 pr-3 py-1.5 bg-[#F8FAFC] border border-[#CBD5E1] rounded-lg text-xs sm:text-sm text-[#0B1C30] placeholder-slate-400 focus:outline-hidden focus:border-[#004AC6]"
+              placeholder="Buscar por PDV ou motivo..."
+              className="w-full pl-9 pr-3 py-1.5 bg-[#F8FAFC] border border-[#CBD5E1] rounded-lg text-xs text-[#0B1C30] placeholder-slate-400 focus:outline-none focus:border-[#004AC6]"
             />
           </div>
-
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+          <div className="flex items-center gap-1.5">
             {[
-              { id: 'todos', label: 'Todos Motivos' },
-              { id: 'Divergência de Pedido', label: 'Divergência' },
-              { id: 'Avaria de Transporte', label: 'Avaria' },
-              { id: 'Recusa Comercial', label: 'Recusa Comercial' },
-              { id: 'Cliente Fechado (3 tentativas)', label: 'Cliente Fechado' },
-            ].map((tab) => (
+              { id: 'todos', label: 'Todas' },
+              { id: 'PENDING', label: 'Pendentes' },
+              { id: 'APPROVED', label: 'Aprovadas' },
+              { id: 'REJECTED', label: 'Rejeitadas' },
+            ].map((f) => (
               <button
-                key={tab.id}
-                onClick={() => setReasonFilter(tab.id)}
+                key={f.id}
+                onClick={() => setStatusFilter(f.id)}
                 className={`px-3 py-1 text-xs font-bold rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
-                  reasonFilter === tab.id
+                  statusFilter === f.id
                     ? 'bg-[#004AC6] text-white'
                     : 'bg-[#F1F5F9] text-slate-600 hover:bg-slate-200'
                 }`}
               >
-                {tab.label}
+                {f.label}
               </button>
             ))}
           </div>
         </div>
-
-        {/* Returns Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs text-[#0B1C30]">
-            <thead className="bg-[#F8FAFC] text-[#737686] font-bold border-b border-[#E2E8F0]">
-              <tr>
-                <th className="py-3 px-4">Código / NFe</th>
-                <th className="py-3 px-4">Cliente / Origem</th>
-                <th className="py-3 px-4">Mercadorias / Valor</th>
-                <th className="py-3 px-4">Motivo da Recusa</th>
-                <th className="py-3 px-4">Status no Armazém</th>
-                <th className="py-3 px-4 text-right">Ação</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#F1F5F9]">
-              {filteredReturns.map((ret) => (
-                <tr key={ret.id} className="hover:bg-[#F8FAFC] transition-colors">
-                  <td className="py-3 px-4">
-                    <div className="font-mono font-bold text-[#004AC6]">{ret.returnCode}</div>
-                    <div className="text-[11px] text-slate-700 font-semibold">{ret.nfeNumber}</div>
-                    <div className="text-[10px] text-slate-400 font-mono">Reg: {ret.registeredAt}</div>
-                  </td>
-
-                  <td className="py-3 px-4">
-                    <div className="font-semibold text-[#0B1C30]">{ret.clientName}</div>
-                    <div className="text-[11px] text-slate-500">{ret.city}</div>
-                    <div className="text-[10px] text-slate-400">
-                      Veículo: <strong className="font-mono">{ret.vehiclePlate}</strong> ({ret.driverName})
-                    </div>
-                  </td>
-
-                  <td className="py-3 px-4">
-                    <div className="font-medium text-slate-800">{ret.itemsDescription}</div>
-                    <div className="text-[11px] font-bold text-[#0B1C30] mt-0.5">
-                      R$ {ret.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                    </div>
-                  </td>
-
-                  <td className="py-3 px-4">
-                    <span className="inline-flex items-center gap-1 font-semibold bg-amber-50 text-amber-900 px-2 py-0.5 rounded border border-amber-200">
-                      {ret.reason}
-                    </span>
-                    {ret.notes && (
-                      <p className="text-[10px] text-slate-500 mt-1 line-clamp-1 italic">
-                        "{ret.notes}"
-                      </p>
-                    )}
-                  </td>
-
-                  <td className="py-3 px-4">
-                    {ret.warehouseStatus === 'Estornado ao Estoque' && (
-                      <TangramBadge variant="success">Estornado ao Estoque</TangramBadge>
-                    )}
-                    {ret.warehouseStatus === 'Em Conferência no Pátio' && (
-                      <TangramBadge variant="warning">Em Conferência no CD</TangramBadge>
-                    )}
-                    {ret.warehouseStatus === 'A Caminho do CD' && (
-                      <TangramBadge variant="info">Retornando ({ret.estimatedArrivalAtCD})</TangramBadge>
-                    )}
-                    {ret.warehouseStatus === 'Laudo Aprovado' && (
-                      <TangramBadge variant="neutral">Laudo Aprovado</TangramBadge>
-                    )}
-                    {ret.warehouseStatus === 'Destinado a Seguradora' && (
-                      <TangramBadge variant="danger">Acionado Sinistro</TangramBadge>
-                    )}
-                  </td>
-
-                  <td className="py-3 px-4 text-right">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedReturnForInspection(ret)}
-                      className="inline-flex items-center gap-1 text-xs font-bold text-[#004AC6] hover:bg-[#EFF4FF] border border-[#BFDBFE] px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
-                    >
-                      <ClipboardCheck className="w-3.5 h-3.5" />
-                      Inspecionar
-                    </button>
-                  </td>
+        {loading ? (
+          <div className="p-10 text-center text-sm text-slate-400">Carregando devoluções...</div>
+        ) : error ? (
+          <div className="p-10 text-center text-sm text-rose-500">{error}</div>
+        ) : filtered.length === 0 ? (
+          <div className="p-10 text-center">
+            <RotateCcw className="w-8 h-8 text-slate-200 mx-auto mb-3" />
+            <div className="text-sm font-semibold text-slate-400">Nenhuma devolução encontrada</div>
+            <div className="text-xs text-slate-400 mt-1">
+              Importe o CSV do BEES para carregar as devoluções do dia.
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs text-[#0B1C30]">
+              <thead className="bg-[#F8FAFC] text-[#737686] font-bold border-b border-[#E2E8F0]">
+                <tr>
+                  <th className="py-3 px-4">PDV</th>
+                  <th className="py-3 px-4">Motivo</th>
+                  <th className="py-3 px-4">Registrado em</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4">Obs. Supervisor</th>
+                  <th className="py-3 px-4 text-right">Ação</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-[#F1F5F9]">
+                {filtered.map((dev) => (
+                  <tr key={dev.id} className="hover:bg-[#F8FAFC] transition-colors">
+                    <td className="py-3 px-4">
+                      <div className="font-semibold">{orDash(dev.poc_name)}</div>
+                      <div className="text-[11px] text-slate-500 font-mono">{orDash(dev.poc_external_id)}</div>
+                    </td>
+                    <td className="py-3 px-4">
+                      <div className="font-semibold text-slate-800">{dev.reason}</div>
+                      {dev.reason_description && (
+                        <div className="text-[11px] text-slate-500 mt-0.5">{dev.reason_description}</div>
+                      )}
+                    </td>
+                    <td className="py-3 px-4 text-slate-500">
+                      {new Date(dev.created_at).toLocaleString('pt-BR', {
+                        day: '2-digit', month: '2-digit',
+                        hour: '2-digit', minute: '2-digit',
+                      })}
+                    </td>
+                    <td className="py-3 px-4">{devolutionStatusBadge(dev.status)}</td>
+                    <td className="py-3 px-4 max-w-xs text-slate-500">
+                      {orDash(dev.supervisor_comments)}
+                    </td>
+                    <td className="py-3 px-4 text-right">
+                      {dev.status === 'PENDING' && isSupervisorOrAbove ? (
+                        <button
+                          type="button"
+                          onClick={() => openApprovalModal(dev)}
+                          className="inline-flex items-center gap-1 text-xs font-bold bg-[#F39818] hover:bg-[#D97F10] text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer shadow-xs"
+                        >
+                          <ClipboardCheck className="w-3.5 h-3.5" />
+                          Analisar
+                        </button>
+                      ) : dev.status === 'PENDING' ? (
+                        <span className="text-[11px] text-slate-400">Aguard. supervisor</span>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </TangramCard>
 
-      {/* Modal: Inspecionar e Estornar Devolução */}
-      {selectedReturnForInspection && (
+      {/* Modal de aprovação */}
+      {approvalModal && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <form
-            onSubmit={handleCompleteInspection}
-            className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95"
-          >
+          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95">
             <div className="p-4 bg-[#F8FAFC] border-b border-slate-200 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <ClipboardCheck className="w-5 h-5 text-[#004AC6]" />
-                <h3 className="text-sm font-bold text-[#0B1C30]">
-                  Laudo de Entrada & Estorno • {selectedReturnForInspection.returnCode}
-                </h3>
+                <ClipboardCheck className="w-5 h-5 text-[#F39818]" />
+                <div>
+                  <h3 className="text-sm font-bold text-[#0B1C30]">Analisar Devolução</h3>
+                  <p className="text-[11px] text-slate-500">{approvalModal.poc_name}</p>
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setSelectedReturnForInspection(null)}
-                className="p-1 text-slate-400 hover:text-slate-700 rounded-lg"
-              >
+              <button onClick={closeApprovalModal} className="p-1 text-slate-400 hover:text-slate-700 rounded-lg">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="p-5 space-y-4 text-xs text-[#0B1C30]">
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
-                <div className="flex justify-between">
-                  <span className="text-slate-500">NFe Original:</span>
-                  <strong className="font-mono">{selectedReturnForInspection.nfeNumber}</strong>
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-100 space-y-1.5">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 uppercase">Motivo</span>
+                  <div className="font-semibold text-slate-800">{approvalModal.reason}</div>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Cliente Recusante:</span>
-                  <strong>{selectedReturnForInspection.clientName}</strong>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Valor das Mercadorias:</span>
-                  <strong className="text-[#006C49]">
-                    R$ {selectedReturnForInspection.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                  </strong>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Motivo Informado:</span>
-                  <span className="font-semibold text-amber-700">{selectedReturnForInspection.reason}</span>
-                </div>
+                {approvalModal.reason_description && (
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-500 uppercase">Descrição</span>
+                    <div className="text-slate-700">{approvalModal.reason_description}</div>
+                  </div>
+                )}
               </div>
 
               <div>
                 <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                  Decisão da Vistoria Técnica:
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <label
-                    className={`p-3 rounded-xl border flex flex-col cursor-pointer transition-all ${
-                      inspectionDecision === 'Estornado ao Estoque'
-                        ? 'border-[#006C49] bg-emerald-50 text-emerald-950 font-bold'
-                        : 'border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="decision"
-                      checked={inspectionDecision === 'Estornado ao Estoque'}
-                      onChange={() => setInspectionDecision('Estornado ao Estoque')}
-                      className="sr-only"
-                    />
-                    <span>Reincorporar ao Estoque</span>
-                    <span className="text-[10px] font-normal text-slate-500 mt-0.5">
-                      Itens 100% íntegros, retornam ao estoque.
-                    </span>
-                  </label>
-
-                  <label
-                    className={`p-3 rounded-xl border flex flex-col cursor-pointer transition-all ${
-                      inspectionDecision === 'Destinado a Seguradora'
-                        ? 'border-rose-600 bg-rose-50 text-rose-950 font-bold'
-                        : 'border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="decision"
-                      checked={inspectionDecision === 'Destinado a Seguradora'}
-                      onChange={() => setInspectionDecision('Destinado a Seguradora')}
-                      className="sr-only"
-                    />
-                    <span>Sinistro / Seguradora</span>
-                    <span className="text-[10px] font-normal text-slate-500 mt-0.5">
-                      Avaria total ou dano irreparável. Encaminha para indenização.
-                    </span>
-                  </label>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                  Observações do Laudo / Conferente:
+                  Observação do supervisor (opcional):
                 </label>
                 <textarea
-                  rows={2}
-                  value={inspectionNotes}
-                  onChange={(e) => setInspectionNotes(e.target.value)}
-                  placeholder="Ex: Embalagem externa com pequena ressalva, produto interno testado e aprovado para revenda."
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:border-[#004AC6] focus:outline-hidden"
+                  value={supervisorComment}
+                  onChange={(e) => setSupervisorComment(e.target.value)}
+                  rows={3}
+                  placeholder="Ex: Mapa pernoitado, cliente reagendou para amanhã..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:border-[#004AC6] focus:outline-none resize-none"
                 />
               </div>
 
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setSelectedReturnForInspection(null)}
+                  onClick={closeApprovalModal}
                   className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg"
                 >
                   Cancelar
                 </button>
                 <button
-                  type="submit"
-                  className="px-4 py-1.5 text-xs font-bold bg-[#004AC6] hover:bg-[#003899] text-white rounded-lg shadow-2xs cursor-pointer"
+                  type="button"
+                  disabled={saving}
+                  onClick={() => { void handleApprove('REJECTED'); }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-lg cursor-pointer disabled:opacity-50"
                 >
-                  Aprovar Laudo & Emitir NFe de Entrada
+                  <XCircle className="w-3.5 h-3.5" />
+                  Rejeitar
+                </button>
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => { void handleApprove('APPROVED'); }}
+                  className="inline-flex items-center gap-1 px-4 py-1.5 text-xs font-bold bg-[#006C49] hover:bg-[#005538] text-white rounded-lg cursor-pointer disabled:opacity-50"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Aprovar
                 </button>
               </div>
             </div>
-          </form>
+          </div>
         </div>
       )}
     </div>

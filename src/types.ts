@@ -6,7 +6,9 @@ export type MonitoramentoArea =
   | 'gestao-devolucao'
   | 'gestao-tml'
   | 'soltura'
-  | 'gestao-equipes';
+  | 'gestao-equipes'
+  | 'buffer'
+  | 'cadastros';
 
 export type TabId = 
   | 'monitoramento'
@@ -382,6 +384,26 @@ export type DevolutionInsert = Omit<
 export interface DevolutionApproval {
   status: 'APPROVED' | 'REJECTED';
   supervisor_comments?: string;
+}
+
+// ─── Buffer ───────────────────────────────────────────────────────────────────
+
+export type BufferStatus = 'PENDING' | 'SCHEDULED' | 'DELIVERED' | 'CANCELLED';
+
+export interface BufferEntry {
+  id: string;
+  poc_external_id: string;
+  poc_name: string;
+  original_date: string;        // 'YYYY-MM-DD'
+  scheduled_date: string | null;
+  volume_hl: number | null;
+  reason: string | null;
+  status: BufferStatus;
+  assigned_tour_id: string | null;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // ── KPIs ─────────────────────────────────────────────────────

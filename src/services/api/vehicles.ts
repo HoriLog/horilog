@@ -99,3 +99,42 @@ export function subscribeToVehicles(onChange: () => void): () => void {
     supabase.removeChannel(channel);
   };
 }
+
+export interface TeamMemberProfilePatch {
+  name?: string;
+  phone?: string | null;
+  cnh_number?: string | null;
+  cnh_category?: string | null;
+}
+
+export async function updateTeamMemberProfile(
+  id: string,
+  patch: TeamMemberProfilePatch
+): Promise<void> {
+  const { error } = await supabase
+    .from('team_members')
+    .update(patch)
+    .eq('id', id);
+  if (error) throw error;
+}
+
+export interface VehicleUpdateInput {
+  plate?: string;
+  model?: string;
+  category?: string;
+  type?: string;
+  driver_name?: string | null;
+  odometer_km?: number | null;
+  fuel_capacity_l?: number | null;
+}
+
+export async function updateVehicle(
+  id: string,
+  patch: VehicleUpdateInput
+): Promise<void> {
+  const { error } = await supabase
+    .from('vehicles')
+    .update(patch)
+    .eq('id', id);
+  if (error) throw error;
+}

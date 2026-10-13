@@ -100,3 +100,21 @@ export function subscribeToTeamMembers(onChange: () => void): () => void {
     supabase.removeChannel(channel);
   };
 }
+
+export interface TeamMemberProfilePatch {
+  name?: string;
+  phone?: string | null;
+  cnh_number?: string | null;
+  cnh_category?: string | null;
+}
+
+export async function updateTeamMemberProfile(
+  id: string,
+  patch: TeamMemberProfilePatch
+): Promise<void> {
+  const { error } = await supabase
+    .from('team_members')
+    .update(patch)
+    .eq('id', id);
+  if (error) throw error;
+}

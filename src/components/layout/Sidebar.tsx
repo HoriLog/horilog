@@ -1,17 +1,12 @@
 import React, { useState } from 'react';
 import { TabId, MonitoramentoArea } from '../../types';
 import { HorizonteLogo } from '../common/HorizonteLogo';
-import { OperationalStorage } from '../../services/storageService';
-import { useStorageVersion } from '../../hooks/useStorageVersion';
 import { UNITS } from '../../config/operation';
 import {
   Activity,
-  Truck,
-  PackageCheck,
-  Headphones,
+  PackageCheck,  // ← adicionar esta linha
   RotateCcw,
   Timer,
-  ShieldCheck,
   Users,
   Building2,
   ChevronDown,
@@ -44,68 +39,36 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isCollapsed = false,
   onToggleCollapse,
 }) => {
-  useStorageVersion();
   const [selectedFilial, setSelectedFilial] = useState(FILIAIS[0]);
   const [isFilialDropdownOpen, setIsFilialDropdownOpen] = useState(false);
   const [isSubMenuOpen, setIsSubMenuOpen] = useState(true);
 
-  const realVehiclesCount = OperationalStorage.getVehicles().length;
-  const realDeliveriesCount = OperationalStorage.getDeliveries().length;
-  const realTicketsCount = OperationalStorage.getTickets().filter((t) => t.status === 'Aberto').length;
-  const realReturnsCount = OperationalStorage.getReturns().length;
-  const realTmlCount = OperationalStorage.getTmlVehicles().length;
-  const realSolturasCount = OperationalStorage.getSolturas().length;
-  const realTeamCount = OperationalStorage.getTeamMembers().length;
-
   const monitoramentoSubAreas = [
     {
-      id: 'torre-kpis' as MonitoramentoArea,
-      label: 'Analytics',
-      icon: Activity,
+      id: 'gestao-entregas'  as MonitoramentoArea,
+      label: 'Gestão de Entregas',
+      icon: PackageCheck,
       badge: undefined,
     },
     {
-      id: 'frota' as MonitoramentoArea,
-      label: 'Frota',
-      icon: Truck,
-      badge: realVehiclesCount > 0 ? `${realVehiclesCount} veíc.` : undefined,
-    },
-    {
-      id: 'gestao-entregas' as MonitoramentoArea,
-      label: 'Gestão de entregas',
-      icon: PackageCheck,
-      badge: realDeliveriesCount > 0 ? `${realDeliveriesCount} NFs` : undefined,
-    },
-    {
-      id: 'suporte-equipes' as MonitoramentoArea,
-      label: 'Suporte à equipes',
-      icon: Headphones,
-      badge: realTicketsCount > 0 ? `${realTicketsCount} abertos` : undefined,
-    },
-    {
       id: 'gestao-devolucao' as MonitoramentoArea,
-      label: 'Gestão de devolução',
+      label: 'Gestão de Devolução',
       icon: RotateCcw,
-      badge: realReturnsCount > 0 ? `${realReturnsCount}` : undefined,
+      badge: undefined,
     },
     {
-      id: 'gestao-tml' as MonitoramentoArea,
-      label: 'Gestão de TML',
+      id: 'buffer'           as MonitoramentoArea,
+      label: 'Buffer',
       icon: Timer,
-      badge: realTmlCount > 0 ? `${realTmlCount}` : undefined,
+      badge: undefined,
     },
     {
-      id: 'soltura' as MonitoramentoArea,
-      label: 'Soltura',
-      icon: ShieldCheck,
-      badge: realSolturasCount > 0 ? `${realSolturasCount}` : undefined,
-    },
-    {
-      id: 'gestao-equipes' as MonitoramentoArea,
-      label: 'Gestão de equipes',
+      id: 'cadastros'        as MonitoramentoArea,
+      label: 'Cadastros',
       icon: Users,
-      badge: realTeamCount > 0 ? `${realTeamCount}` : undefined,
+      badge: undefined,
     },
+    
   ];
 
   const handleMonitoramentoClick = () => {

@@ -46,6 +46,8 @@ const TAB_TITLES: Record<TabId, string> = {
   'gestao-equipes': 'Gestão de Equipes',
   'dashboard-kpis': 'Torre de Controle',
   'gestao-frota': 'Telemetria & Frota',
+  buffer: 'Buffer',
+  cadastros: 'Cadastros',
 };
 
 export const Header: React.FC<HeaderProps> = ({
