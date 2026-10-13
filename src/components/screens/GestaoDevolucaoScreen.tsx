@@ -1,432 +1,415 @@
 import React, { useState, useRef } from 'react';
-import { useDevolutions } from '../../hooks/useTours';
+import { AlertTriangle, CheckCircle, Clock, XCircle } from 'lucide-react';
+import { useDevolutions } from '../../hooks/useDevolutions';
 import { useAuth } from '../../hooks/useAuth';
-import { useToast } from '../../hooks/useToast';
-import { orDash } from '../../utils/format';
-import { importBeesRoutes, type ImportBeesResult } from '../../services/importBeesRoutes';
-import { TangramCard } from '../tangram/TangramCard';
-import { TangramBadge } from '../tangram/TangramBadge';
-import type { Devolution, DevolutionApproval } from '../../types';
-import {
-  RotateCcw,
-  CheckCircle2,
-  XCircle,
-  Search,
-  Clock,
-  ClipboardCheck,
-  X,
-  AlertTriangle,
-  Upload,
-  FileText,
-} from 'lucide-react';
+import { devolutionReasons, DevolutionReason } from '../../constants/devolutionReasons';
+import { importBeesRoutes } from '../../services/importBeesRoutes';
+import type { DevolutionRow } from '../../services/api/devolutions';
 
-function devolutionStatusBadge(status: string) {
-  switch (status) {
-    case 'APPROVED': return <TangramBadge variant="success">Aprovada</TangramBadge>;
-    case 'REJECTED': return <TangramBadge variant="danger">Rejeitada</TangramBadge>;
-    default:         return <TangramBadge variant="warning">Pendente</TangramBadge>;
-  }
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'agora';
+  if (mins < 60) return `${mins} min atrás`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h atrás`;
+  return `${Math.floor(hrs / 24)}d atrás`;
 }
 
+type OcorrenciaStatus = 'Pendente' | 'Em andamento' | 'Concluída';
+
+function getStatus(d: DevolutionRow): OcorrenciaStatus {
+  if (d.status === 'APPROVED' || d.status === 'REJECTED') return 'Concluída';
+  if (d.supervisor_id) return 'Em andamento';
+  return 'Pendente';
+}
+
+const STATUS_BADGE: Record<OcorrenciaStatus, string> = {
+  'Pendente':     'bg-amber-100 text-amber-800',
+  'Em andamento': 'bg-blue-100  text-blue-800',
+  'Concluída':    'bg-slate-100 text-slate-600',
+};
+
+const INPUT = 'w-full border border-slate-300 rounded-md px-3 py-2.5 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none';
+
+// ─── Componente principal ─────────────────────────────────────────────────────
+
 export const GestaoDevolucaoScreen: React.FC = () => {
-  const [statusFilter, setStatusFilter] = useState('todos');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [approvalModal, setApprovalModal] = useState<Devolution | null>(null);
-  const [supervisorComment, setSupervisorComment] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<ImportBeesResult | null>(null);
-  const [toast, showToast] = useToast();
+  const { devolutions, loading, updateStatus, createManual, refresh } = useDevolutions();
+  const { profile } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const { devolutions, pending, loading, error, approve, reload } = useDevolutions();
-  const { session, profile } = useAuth();
+  const [activeFilter, setActiveFilter] = useState<'pending' | 'concluded'>('pending');
+  const [selected, setSelected]         = useState<DevolutionRow | null>(null);
+  const [isManualOpen, setIsManualOpen] = useState(false);
+  const [isImporting, setIsImporting]   = useState(false);
 
-  const isSupervisorOrAbove =
-    profile?.role === 'supervisor' || profile?.role === 'gerencia';
+  // Form manual
+  const [mTourId,    setMTourId]    = useState('');
+  const [mPocId,     setMPocId]     = useState('');
+  const [mPocName,   setMPocName]   = useState('');
+  const [mReason,    setMReason]    = useState('');
+  const [mComments,  setMComments]  = useState('');
+  const [mSaving,    setMSaving]    = useState(false);
+  const [mError,     setMError]     = useState<string | null>(null);
 
-  const filtered = devolutions.filter((d) => {
-  const matchesSearch =
-    !searchQuery ||
-    (d.poc_name ?? '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (d.reason ?? '').toLowerCase().includes(searchQuery.toLowerCase());
-  const matchesStatus = statusFilter === 'todos' || d.status === statusFilter;
-  return matchesSearch && matchesStatus;
-});
+  // Form tratativa
+  const [tReason,   setTReason]    = useState('');
+  const [tComments, setTComments]  = useState('');
+  const [tSaving,   setTSaving]    = useState(false);
 
-  // ── Importação CSV ───────────────────────────────────────────
+  // KPIs
+  const total     = devolutions.length;
+  const pending   = devolutions.filter(d => getStatus(d) === 'Pendente').length;
+  const inProgress = devolutions.filter(d => getStatus(d) === 'Em andamento').length;
+  const concluded = devolutions.filter(d => getStatus(d) === 'Concluída').length;
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const filtered = devolutions.filter(d =>
+    activeFilter === 'pending'
+      ? getStatus(d) !== 'Concluída'
+      : getStatus(d) === 'Concluída'
+  );
+
+  // ── Importação CSV ──────────────────────────────────────────────────────────
+
+  async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    setImporting(true);
-    setImportResult(null);
-
     try {
+      setIsImporting(true);
       const text = await file.text();
-      const result = await importBeesRoutes(text);
-      setImportResult(result);
-
-      if (result.errors.length === 0) {
-        showToast(
-          `Importado: ${result.toursUpserted} mapas, ${result.deliveriesUpserted} entregas, ${result.devolutionsCreated} devoluções criadas.`
-        );
-        void reload();
-      } else {
-        showToast(`Importado com avisos. Verifique o relatório.`);
-        void reload();
-      }
-    } catch (err) {
-      showToast('Erro ao processar o arquivo. Verifique o formato.');
+      const r    = await importBeesRoutes(text);
+      alert(
+        `Importação concluída!\n\nMapas: ${r.toursUpserted}\nParadas: ${r.deliveriesUpserted}\nOcorrências: ${r.devolutionsCreated}`
+      );
+      await refresh();
+    } catch (err: any) {
+      alert(`Erro na importação: ${err.message}`);
     } finally {
-      setImporting(false);
-      // Limpa o input para permitir reimportar o mesmo arquivo
+      setIsImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
-  };
+  }
 
-  // ── Aprovação ────────────────────────────────────────────────
+  // ── Devolução manual ────────────────────────────────────────────────────────
 
-  const openApprovalModal = (dev: Devolution) => {
-    setApprovalModal(dev);
-    setSupervisorComment('');
-  };
-
-  const closeApprovalModal = () => {
-    setApprovalModal(null);
-    setSupervisorComment('');
-  };
-
-  const handleApprove = async (decision: 'APPROVED' | 'REJECTED') => {
-    if (!approvalModal || !session?.user) return;
-    setSaving(true);
+  async function handleManualSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!mTourId || !mPocId || !mPocName || !mReason) return;
+    const found = devolutionReasons.find((r: DevolutionReason) => r.code.toString() === mReason);
+    setMSaving(true);
+    setMError(null);
     try {
-      const approval: DevolutionApproval = {
-        status: decision,
-        supervisor_comments: supervisorComment || undefined,
-      };
-      await approve(approvalModal.id, approval, session.user.id);
-      showToast(decision === 'APPROVED' ? 'Devolução aprovada.' : 'Devolução rejeitada.');
-      closeApprovalModal();
-    } catch {
-      showToast('Erro ao processar. Tente novamente.');
+      await createManual({
+        external_tour_id:   mTourId,
+        poc_external_id:    mPocId,
+        poc_name:           mPocName,
+        reason:             mReason,
+        reason_description: found ? found.description : 'Motivo Manual',
+        supervisor_comments: mComments || undefined,
+      });
+      setMTourId(''); setMPocId(''); setMPocName('');
+      setMReason(''); setMComments('');
+      setIsManualOpen(false);
+    } catch (err: any) {
+      setMError(err.message);
     } finally {
-      setSaving(false);
+      setMSaving(false);
     }
-  };
+  }
+
+  // ── Tratativa ───────────────────────────────────────────────────────────────
+
+  async function handleAction(status: 'APPROVED' | 'REJECTED') {
+    if (!selected || !profile) return;
+    setTSaving(true);
+    try {
+      await updateStatus(selected.id, status, profile.id, tComments || null);
+      setSelected(null);
+      setTReason(''); setTComments('');
+    } catch (err: any) {
+      alert(err.message || 'Erro ao atualizar tratativa');
+    } finally {
+      setTSaving(false);
+    }
+  }
+
+  // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <div className="space-y-6">
-      {/* Toast */}
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 bg-[#006C49] text-white px-4 py-3 rounded-xl shadow-xl flex items-center gap-2.5 text-xs font-semibold animate-in fade-in slide-in-from-bottom-2">
-          <CheckCircle2 className="w-4 h-4" />
-          <span>{toast}</span>
-        </div>
-      )}
+    <div className="space-y-4">
+      <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleImport} />
 
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl sm:text-2xl font-black text-[#1E2D72] tracking-tight">
-              Gestão de Devolução
-            </h1>
-          </div>
-          <p className="text-xs sm:text-sm text-[#64748B] mt-1">
-            Devoluções pendentes de aprovação • Fluxo supervisor
-          </p>
+          <h1 className="text-xl font-semibold text-gray-900">Ocorrências e Devoluções</h1>
+          <p className="text-sm text-gray-500 mt-0.5">CDD Caruaru — Gestão Last-mile</p>
         </div>
-
-        {/* Botão de importação */}
-        <div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".csv"
-            className="hidden"
-            onChange={(e) => { void handleFileSelect(e); }}
-          />
+        <div className="flex gap-2">
           <button
-            type="button"
-            disabled={importing}
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-bold bg-[#1E2D72] hover:bg-[#162260] text-white rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-60"
+            disabled={isImporting}
+            className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50 transition-colors"
           >
-            <Upload className="w-3.5 h-3.5" />
-            {importing ? 'Importando...' : 'Importar CSV do BEES'}
+            {isImporting ? 'Importando...' : 'Importar CSV (BEES)'}
+          </button>
+          <button
+            onClick={() => setIsManualOpen(true)}
+            className="px-4 py-2 text-sm font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 transition-colors"
+          >
+            + Nova Ocorrência Manual
           </button>
         </div>
       </div>
 
-      {/* Resultado da importação */}
-      {importResult && (
-        <div className={`rounded-xl border p-4 text-xs ${
-          importResult.errors.length > 0
-            ? 'bg-amber-50 border-amber-200'
-            : 'bg-emerald-50 border-emerald-200'
-        }`}>
-          <div className="flex items-start gap-3">
-            <FileText className={`w-4 h-4 mt-0.5 shrink-0 ${
-              importResult.errors.length > 0 ? 'text-amber-600' : 'text-emerald-600'
-            }`} />
-            <div className="flex-1">
-              <div className="font-bold text-[#0B1C30] mb-1">Resultado da importação</div>
-              <div className="flex flex-wrap gap-4 text-[11px]">
-                <span>✅ <strong>{importResult.toursUpserted}</strong> mapas</span>
-                <span>✅ <strong>{importResult.deliveriesUpserted}</strong> entregas</span>
-                <span>🔄 <strong>{importResult.devolutionsCreated}</strong> devoluções criadas</span>
-                {importResult.skipped > 0 && (
-                  <span>⚠️ <strong>{importResult.skipped}</strong> linhas ignoradas</span>
-                )}
-              </div>
-              {importResult.errors.length > 0 && (
-                <div className="mt-2 space-y-1">
-                  {importResult.errors.map((e, i) => (
-                    <div key={i} className="text-rose-700 text-[11px]">• {e}</div>
-                  ))}
-                </div>
-              )}
-            </div>
-            <button
-              onClick={() => setImportResult(null)}
-              className="text-slate-400 hover:text-slate-600"
-            >
-              <X className="w-4 h-4" />
-            </button>
+      {/* ── KPIs ── */}
+      <div className="grid grid-cols-4 gap-3">
+        {[
+          { label: 'Total',        value: total,      icon: <AlertTriangle className="w-4 h-4" />, color: 'text-slate-600 bg-slate-50   border-slate-200'  },
+          { label: 'Pendentes',    value: pending,    icon: <Clock className="w-4 h-4" />,         color: 'text-amber-700 bg-amber-50   border-amber-200'  },
+          { label: 'Em andamento', value: inProgress, icon: <Clock className="w-4 h-4" />,         color: 'text-blue-700  bg-blue-50    border-blue-200'   },
+          { label: 'Concluídas',   value: concluded,  icon: <CheckCircle className="w-4 h-4" />,   color: 'text-green-700 bg-green-50   border-green-200'  },
+        ].map(k => (
+          <div key={k.label} className={`rounded-xl p-4 border ${k.color}`}>
+            <div className="flex items-center gap-2 mb-1 opacity-75">{k.icon}<span className="text-xs font-medium">{k.label}</span></div>
+            <p className="text-2xl font-bold">{k.value}</p>
           </div>
-        </div>
-      )}
-
-      {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
-        <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-[#E2E8F0] shadow-xs">
-          <div className="flex items-center justify-between text-[#737686] text-xs font-semibold mb-1">
-            <span>Total de Devoluções</span>
-            <RotateCcw className="w-4 h-4 text-[#004AC6]" />
-          </div>
-          <div className="text-xl sm:text-2xl font-black text-[#0B1C30]">{devolutions.length}</div>
-          <div className="text-[11px] text-slate-500 mt-0.5">todos os registros</div>
-        </div>
-
-        <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-[#E2E8F0] shadow-xs">
-          <div className="flex items-center justify-between text-[#737686] text-xs font-semibold mb-1">
-            <span>Pendentes Aprovação</span>
-            <Clock className="w-4 h-4 text-[#F39818]" />
-          </div>
-          <div className="text-xl sm:text-2xl font-black text-[#F39818]">{pending.length}</div>
-          <div className={`text-[11px] font-semibold mt-0.5 ${pending.length > 0 ? 'text-amber-600' : 'text-slate-500'}`}>
-            {pending.length > 0 ? 'Aguardando supervisor' : 'Nenhuma pendente'}
-          </div>
-        </div>
-
-        <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-[#E2E8F0] shadow-xs">
-          <div className="flex items-center justify-between text-[#737686] text-xs font-semibold mb-1">
-            <span>Aprovadas</span>
-            <CheckCircle2 className="w-4 h-4 text-[#006C49]" />
-          </div>
-          <div className="text-xl sm:text-2xl font-black text-[#006C49]">
-            {devolutions.filter((d) => d.status === 'APPROVED').length}
-          </div>
-          <div className="text-[11px] text-slate-500 mt-0.5">pelo supervisor</div>
-        </div>
+        ))}
       </div>
 
-      {/* Alerta de pendentes para supervisor */}
-      {isSupervisorOrAbove && pending.length > 0 && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
-          <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-          <div>
-            <div className="text-sm font-bold text-amber-800">
-              {pending.length} devolução{pending.length > 1 ? 'ões' : ''} aguardando sua aprovação
-            </div>
-            <div className="text-xs text-amber-700 mt-0.5">
-              Use o botão "Analisar" na tabela abaixo para aprovar ou rejeitar.
-            </div>
+      {/* ── Barra de status de entregas ── */}
+      <div className="bg-white rounded-xl border border-slate-200 px-5 py-3 flex flex-wrap items-center gap-x-6 gap-y-2">
+        {[
+          { label: 'Devolução esperando tratamento', count: pending,    color: 'bg-amber-400' },
+          { label: 'Devolução em tratamento',        count: inProgress, color: 'bg-blue-500'  },
+          { label: 'Concluídas',                     count: concluded,  color: 'bg-green-500' },
+        ].map(s => (
+          <div key={s.label} className="flex items-center gap-2 text-xs text-slate-600">
+            <span className={`w-2.5 h-2.5 rounded-full ${s.color}`} />
+            {s.label} <span className="font-bold text-slate-800">{s.count}</span>
           </div>
-        </div>
-      )}
+        ))}
+      </div>
 
-      {/* Tabela */}
-      <TangramCard>
-        <div className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-[#F1F5F9]">
-          <div className="relative flex-1 max-w-md">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[#737686]" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Buscar por PDV ou motivo..."
-              className="w-full pl-9 pr-3 py-1.5 bg-[#F8FAFC] border border-[#CBD5E1] rounded-lg text-xs text-[#0B1C30] placeholder-slate-400 focus:outline-none focus:border-[#004AC6]"
-            />
-          </div>
-          <div className="flex items-center gap-1.5">
-            {[
-              { id: 'todos', label: 'Todas' },
-              { id: 'PENDING', label: 'Pendentes' },
-              { id: 'APPROVED', label: 'Aprovadas' },
-              { id: 'REJECTED', label: 'Rejeitadas' },
-            ].map((f) => (
+      {/* ── Conteúdo ── */}
+      <div className="flex gap-4">
+
+        {/* Sidebar filtros */}
+        <div className="w-52 shrink-0 bg-white rounded-xl border border-slate-200 p-3 h-fit">
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 mb-2">Ocorrências</p>
+          <div className="space-y-0.5">
+            {([
+              { key: 'pending'   as const, label: 'Pendentes e em andamento', count: pending + inProgress },
+              { key: 'concluded' as const, label: 'Concluídas',               count: concluded           },
+            ]).map(f => (
               <button
-                key={f.id}
-                onClick={() => setStatusFilter(f.id)}
-                className={`px-3 py-1 text-xs font-bold rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
-                  statusFilter === f.id
-                    ? 'bg-[#004AC6] text-white'
-                    : 'bg-[#F1F5F9] text-slate-600 hover:bg-slate-200'
+                key={f.key}
+                onClick={() => setActiveFilter(f.key)}
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                  activeFilter === f.key
+                    ? 'bg-amber-50 text-amber-800'
+                    : 'text-slate-600 hover:bg-slate-50'
                 }`}
               >
-                {f.label}
+                <span>{f.label}</span>
+                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                  activeFilter === f.key ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-500'
+                }`}>
+                  {f.count}
+                </span>
               </button>
             ))}
           </div>
         </div>
-        {loading ? (
-          <div className="p-10 text-center text-sm text-slate-400">Carregando devoluções...</div>
-        ) : error ? (
-          <div className="p-10 text-center text-sm text-rose-500">{error}</div>
-        ) : filtered.length === 0 ? (
-          <div className="p-10 text-center">
-            <RotateCcw className="w-8 h-8 text-slate-200 mx-auto mb-3" />
-            <div className="text-sm font-semibold text-slate-400">Nenhuma devolução encontrada</div>
-            <div className="text-xs text-slate-400 mt-1">
-              Importe o CSV do BEES para carregar as devoluções do dia.
-            </div>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs text-[#0B1C30]">
-              <thead className="bg-[#F8FAFC] text-[#737686] font-bold border-b border-[#E2E8F0]">
+
+        {/* Tabela */}
+        <div className="flex-1 bg-white rounded-xl border border-slate-200 overflow-hidden">
+          {loading ? (
+            <div className="p-12 text-center text-sm text-slate-400">Carregando ocorrências...</div>
+          ) : filtered.length === 0 ? (
+            <div className="p-12 text-center text-sm text-slate-400">Nenhuma ocorrência nesta categoria.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 border-b border-slate-200">
                 <tr>
-                  <th className="py-3 px-4">PDV</th>
-                  <th className="py-3 px-4">Motivo</th>
-                  <th className="py-3 px-4">Registrado em</th>
-                  <th className="py-3 px-4">Status</th>
-                  <th className="py-3 px-4">Obs. Supervisor</th>
-                  <th className="py-3 px-4 text-right">Ação</th>
+                  {['Tipo da ocorrência', 'Rota', 'Código do PDV', 'Status da ocorrência', 'Atribuído para', 'Relatada', ''].map(h => (
+                    <th key={h} className="text-left px-4 py-3 text-[11px] font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">
+                      {h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#F1F5F9]">
-                {filtered.map((dev) => (
-                  <tr key={dev.id} className="hover:bg-[#F8FAFC] transition-colors">
-                    <td className="py-3 px-4">
-                      <div className="font-semibold">{orDash(dev.poc_name)}</div>
-                      <div className="text-[11px] text-slate-500 font-mono">{orDash(dev.poc_external_id)}</div>
-                    </td>
-                    <td className="py-3 px-4">
-                      <div className="font-semibold text-slate-800">{dev.reason}</div>
-                      {dev.reason_description && (
-                        <div className="text-[11px] text-slate-500 mt-0.5">{dev.reason_description}</div>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-slate-500">
-                      {new Date(dev.created_at).toLocaleString('pt-BR', {
-                        day: '2-digit', month: '2-digit',
-                        hour: '2-digit', minute: '2-digit',
-                      })}
-                    </td>
-                    <td className="py-3 px-4">{devolutionStatusBadge(dev.status)}</td>
-                    <td className="py-3 px-4 max-w-xs text-slate-500">
-                      {orDash(dev.supervisor_comments)}
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      {dev.status === 'PENDING' && isSupervisorOrAbove ? (
-                        <button
-                          type="button"
-                          onClick={() => openApprovalModal(dev)}
-                          className="inline-flex items-center gap-1 text-xs font-bold bg-[#F39818] hover:bg-[#D97F10] text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer shadow-xs"
-                        >
-                          <ClipboardCheck className="w-3.5 h-3.5" />
-                          Analisar
-                        </button>
-                      ) : dev.status === 'PENDING' ? (
-                        <span className="text-[11px] text-slate-400">Aguard. supervisor</span>
-                      ) : null}
-                    </td>
-                  </tr>
-                ))}
+              <tbody className="divide-y divide-slate-100">
+                {filtered.map(d => {
+                  const st = getStatus(d);
+                  return (
+                    <tr key={d.id} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-4 py-3 font-medium text-slate-800">
+                        {d.reason_description || d.reason || '—'}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-slate-600">
+                        {d.external_tour_id ?? '—'}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        <p className="font-medium">{d.poc_external_id ?? '—'}</p>
+                        {d.poc_name && <p className="text-xs text-slate-400">{d.poc_name}</p>}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-semibold ${STATUS_BADGE[st]}`}>
+                          {st}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-600 text-xs">
+                        {d.supervisor_name ?? <span className="text-slate-300">—</span>}
+                      </td>
+                      <td className="px-4 py-3 text-slate-500 text-xs whitespace-nowrap">
+                        {relativeTime(d.created_at)}
+                      </td>
+                      <td className="px-4 py-3">
+                        {st !== 'Concluída' && (
+                          <button
+                            onClick={() => { setSelected(d); setTReason(d.reason ?? ''); setTComments(''); }}
+                            className="text-xs font-semibold px-3 py-1.5 rounded border bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100 transition-colors whitespace-nowrap"
+                          >
+                            Tratar
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
-          </div>
-        )}
-      </TangramCard>
+          )}
+        </div>
+      </div>
 
-      {/* Modal de aprovação */}
-      {approvalModal && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95">
-            <div className="p-4 bg-[#F8FAFC] border-b border-slate-200 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <ClipboardCheck className="w-5 h-5 text-[#F39818]" />
-                <div>
-                  <h3 className="text-sm font-bold text-[#0B1C30]">Analisar Devolução</h3>
-                  <p className="text-[11px] text-slate-500">{approvalModal.poc_name}</p>
-                </div>
+      {/* ── Modal: Ocorrência manual ── */}
+      {isManualOpen && (
+        <Modal title="Nova Ocorrência Manual" onClose={() => { setIsManualOpen(false); setMError(null); }}>
+          <form onSubmit={handleManualSubmit} className="space-y-4">
+            {mError && (
+              <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700">
+                <XCircle className="w-4 h-4 shrink-0" /> {mError}
               </div>
-              <button onClick={closeApprovalModal} className="p-1 text-slate-400 hover:text-slate-700 rounded-lg">
-                <X className="w-5 h-5" />
+            )}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-600 block mb-1">Nº da Rota *</label>
+                <input required className={INPUT} placeholder="Ex: 439337" value={mTourId}
+                  onChange={e => setMTourId(e.target.value)} />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-600 block mb-1">Código do PDV *</label>
+                <input required className={INPUT} placeholder="Ex: 93261" value={mPocId}
+                  onChange={e => setMPocId(e.target.value)} />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-600 block mb-1">Nome do PDV *</label>
+              <input required className={INPUT} placeholder="Nome do estabelecimento" value={mPocName}
+                onChange={e => setMPocName(e.target.value)} />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-600 block mb-1">Motivo (Tabela Promax) *</label>
+              <select required className={INPUT} value={mReason} onChange={e => setMReason(e.target.value)}>
+                <option value="">Selecione o motivo...</option>
+                {devolutionReasons.map((r: DevolutionReason) => (
+                  <option key={r.code} value={r.code}>[{r.code}] {r.description} ({r.responsibility})</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-600 block mb-1">Observações</label>
+              <textarea className={INPUT + ' resize-none'} rows={2}
+                placeholder="Detalhes reportados pelo motorista..." value={mComments}
+                onChange={e => setMComments(e.target.value)} />
+            </div>
+            <div className="flex gap-3 pt-1">
+              <button type="submit" disabled={mSaving}
+                className="flex-1 bg-amber-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-amber-700 disabled:opacity-50 transition-colors">
+                {mSaving ? 'Salvando...' : 'Registrar ocorrência'}
+              </button>
+              <button type="button" onClick={() => { setIsManualOpen(false); setMError(null); }}
+                className="flex-1 bg-slate-100 text-slate-700 py-2 rounded-lg text-sm font-medium hover:bg-slate-200 transition-colors">
+                Cancelar
               </button>
             </div>
+          </form>
+        </Modal>
+      )}
 
-            <div className="p-5 space-y-4 text-xs text-[#0B1C30]">
-              <div className="p-3 bg-slate-50 rounded-lg border border-slate-100 space-y-1.5">
-                <div>
-                  <span className="text-[10px] font-bold text-slate-500 uppercase">Motivo</span>
-                  <div className="font-semibold text-slate-800">{approvalModal.reason}</div>
-                </div>
-                {approvalModal.reason_description && (
-                  <div>
-                    <span className="text-[10px] font-bold text-slate-500 uppercase">Descrição</span>
-                    <div className="text-slate-700">{approvalModal.reason_description}</div>
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                  Observação do supervisor (opcional):
-                </label>
-                <textarea
-                  value={supervisorComment}
-                  onChange={(e) => setSupervisorComment(e.target.value)}
-                  rows={3}
-                  placeholder="Ex: Mapa pernoitado, cliente reagendou para amanhã..."
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:border-[#004AC6] focus:outline-none resize-none"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={closeApprovalModal}
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="button"
-                  disabled={saving}
-                  onClick={() => { void handleApprove('REJECTED'); }}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-lg cursor-pointer disabled:opacity-50"
-                >
-                  <XCircle className="w-3.5 h-3.5" />
-                  Rejeitar
-                </button>
-                <button
-                  type="button"
-                  disabled={saving}
-                  onClick={() => { void handleApprove('APPROVED'); }}
-                  className="inline-flex items-center gap-1 px-4 py-1.5 text-xs font-bold bg-[#006C49] hover:bg-[#005538] text-white rounded-lg cursor-pointer disabled:opacity-50"
-                >
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  Aprovar
-                </button>
+      {/* ── Modal: Tratativa ── */}
+      {selected && (
+        <Modal
+          title={`Tratativa — PDV ${selected.poc_external_id}`}
+          onClose={() => setSelected(null)}
+        >
+          <div className="space-y-4">
+            <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm space-y-1">
+              <p className="text-xs font-bold text-slate-500 uppercase">Motivo reportado</p>
+              <p className="font-medium text-slate-800">{selected.reason_description || selected.reason}</p>
+              <div className="pt-2 border-t border-slate-200 flex justify-between text-xs text-slate-500 mt-2">
+                <span>Rota: <strong className="text-slate-700">{selected.external_tour_id ?? selected.tour_id}</strong></span>
+                <span>Registrada: <strong className="text-slate-700">{relativeTime(selected.created_at)}</strong></span>
               </div>
             </div>
+
+            <div>
+              <label className="text-xs font-semibold text-slate-600 block mb-1">Motivo da tratativa (Promax)</label>
+              <select className={INPUT} value={tReason} onChange={e => setTReason(e.target.value)}>
+                <option value="">Selecione o motivo oficial...</option>
+                {devolutionReasons.map((r: DevolutionReason) => (
+                  <option key={r.code} value={r.code}>[{r.code}] {r.description} ({r.responsibility})</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-slate-600 block mb-1">Comentários do supervisor</label>
+              <textarea className={INPUT + ' resize-none'} rows={3} value={tComments}
+                onChange={e => setTComments(e.target.value)}
+                placeholder="Ex: Cliente reagendou para amanhã cedo..." />
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button onClick={() => setSelected(null)}
+                className="flex-1 bg-slate-100 text-slate-700 py-2 rounded-lg text-sm font-medium hover:bg-slate-200 transition-colors">
+                Cancelar
+              </button>
+              <button onClick={() => handleAction('REJECTED')} disabled={tSaving}
+                className="flex-1 bg-red-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50 transition-colors">
+                Rejeitar
+              </button>
+              <button onClick={() => handleAction('APPROVED')} disabled={tSaving}
+                className="flex-1 bg-green-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors">
+                Aprovar
+              </button>
+            </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );
 };
+
+// ─── Modal wrapper ────────────────────────────────────────────────────────────
+
+function Modal({ title, onClose, children }: {
+  title: string; onClose: () => void; children: React.ReactNode;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <h2 className="font-semibold text-slate-900">{title}</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-lg leading-none">✕</button>
+        </div>
+        <div className="px-6 py-5">{children}</div>
+      </div>
+    </div>
+  );
+}

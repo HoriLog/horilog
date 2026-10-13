@@ -1,14 +1,7 @@
 // src/services/importBeesRoutes.ts
-//
-// Importação do CSV exportado do BEES/Relay para o Supabase.
-// Um arquivo = um dia de operação (N tours, N*M POCs).
-// Fluxo: parse → upsert tours → upsert deliveries → cria devoluções automáticas.
-
 import { parseCsv } from '../utils/csv';
 import { supabase } from './supabaseClient';
-import type { TourInsert, DeliveryInsert, DevolutionInsert } from '../types';
-
-// ── helpers ──────────────────────────────────────────────────
+import type { TourInsert, DeliveryInsert } from '../types';
 
 function toIso(raw: string | undefined): string | undefined {
   if (!raw || raw.trim() === '') return undefined;
@@ -35,13 +28,10 @@ function toBool(raw: string | undefined): boolean | undefined {
 
 function toIsoDate(raw: string | undefined): string | undefined {
   if (!raw || raw.trim() === '') return undefined;
-  // Aceita "2026-09-26" ou "9/26/2026" ou ISO completo
   const d = new Date(raw.trim());
   if (isNaN(d.getTime())) return undefined;
   return d.toISOString().split('T')[0];
 }
-
-// ── resultado da importação ───────────────────────────────────
 
 export interface ImportBeesResult {
   toursUpserted: number;
@@ -50,46 +40,6 @@ export interface ImportBeesResult {
   skipped: number;
   errors: string[];
 }
-
-// ── parse do CSV ──────────────────────────────────────────────
-
-interface RawRow {
-  tour_display_id: string;
-  tour_date: string;
-  distribution_center_id: string;
-  driver_name: string;
-  truck_license_plate: string;
-  trip_start_timestamp: string;
-  trip_end_timestamp: string;
-  tour_status: string;
-  bees_tour_id: string;
-  bees_trip_id: string;
-  bees_created_date: string;
-  poc_external_id: string;
-  poc_name: string;
-  critical_poc: string;
-  visit_order: string;
-  status: string;          // status POR POC
-  arrived_at: string;
-  finished_at: string;
-  actual_delivery_time: string;
-  within_radius: string;
-  skipped_reason: string;
-  last_reason_rescheduled: string;
-  reason_description: string;
-  total_delivered_vol: string;
-  total_refused_vol: string;
-  total_delivered_weight_kilograms: string;
-  total_refused_weight_kilograms: string;
-}
-
-function parseRows(text: string): RawRow[] {
-  const { records } = parseCsv(text);
-  // parseCsv normaliza os headers — mapeamos de volta
-  return records as unknown as RawRow[];
-}
-
-// ── importação principal ──────────────────────────────────────
 
 export async function importBeesRoutes(
   csvText: string
@@ -108,7 +58,6 @@ export async function importBeesRoutes(
     return result;
   }
 
-  // ── 1. Agrupa linhas por tour ────────────────────────────────
   const tourMap = new Map<
     number,
     { tourInsert: TourInsert; rows: typeof records }
@@ -116,7 +65,7 @@ export async function importBeesRoutes(
 
   for (const row of records) {
     const extId = toInt(
-      row['tourdisplayid'] ?? row['tour_display_id'] ?? row['tourid']
+      row['tourdisplayid'] ?? row['tour_display_id'] ?? row['tourid'] ?? row['Tour ID']
     );
     if (!extId) {
       result.skipped++;
@@ -128,13 +77,13 @@ export async function importBeesRoutes(
         external_tour_id: extId,
         tour_date:
           toIsoDate(
-            row['tourdate'] ?? row['tour_date']
+            row['tourdate'] ?? row['tour_date'] ?? row['Tour Date']
           ) ?? new Date().toISOString().split('T')[0],
         distribution_center_id:
           row['distributioncenterid'] ?? row['distribution_center_id'] ?? null,
-        driver_name: row['drivername'] ?? row['driver_name'] ?? null,
+        driver_name: row['drivername'] ?? row['driver_name'] ?? row['Driver Name'] ?? null,
         vehicle_plate:
-          row['trucklicenseplate'] ?? row['truck_license_plate'] ?? null,
+          row['trucklicenseplate'] ?? row['truck_license_plate'] ?? row['Truck License Plate'] ?? null,
         trip_start:
           toIso(row['tripstarttimestamp'] ?? row['trip_start_timestamp']) ??
           null,
@@ -151,7 +100,6 @@ export async function importBeesRoutes(
     tourMap.get(extId)!.rows.push(row);
   }
 
-  // ── 2. Upsert tours ──────────────────────────────────────────
   const tourInserts = Array.from(tourMap.values()).map((t) => t.tourInsert);
 
   const { data: upsertedTours, error: tourError } = await supabase
@@ -166,12 +114,10 @@ export async function importBeesRoutes(
 
   result.toursUpserted = upsertedTours?.length ?? 0;
 
-  // Mapeia external_tour_id → uuid
   const tourIdMap = new Map<number, string>(
     (upsertedTours ?? []).map((t) => [t.external_tour_id as number, t.id as string])
   );
 
-  // ── 3. Monta deliveries ──────────────────────────────────────
   const deliveryInserts: DeliveryInsert[] = [];
 
   for (const [extId, { rows }] of tourMap.entries()) {
@@ -180,14 +126,16 @@ export async function importBeesRoutes(
 
     for (const row of rows) {
       const pocId =
-        row['pocexternalid'] ?? row['poc_external_id'] ?? '';
+        row['pocexternalid'] ?? row['poc_external_id'] ?? row['POC External ID'] ?? '';
       const pocName =
-        row['pocname'] ?? row['poc_name'] ?? '';
+        row['pocname'] ?? row['poc_name'] ?? row['POC Name'] ?? '';
 
       if (!pocName && !pocId) {
         result.skipped++;
         continue;
       }
+
+      const rowStatus = String(row['status'] ?? row['Status'] ?? 'PENDING').toUpperCase();
 
       deliveryInserts.push({
         tour_id: tourUuid,
@@ -197,7 +145,7 @@ export async function importBeesRoutes(
           toBool(row['criticalpoc'] ?? row['critical_poc']) ?? false,
         visit_order:
           toInt(row['visitorder'] ?? row['visit_order']) ?? null,
-        status: ((row['status'] as string) || 'PENDING') as DeliveryInsert['status'],
+        status: rowStatus as DeliveryInsert['status'],
         delivery_window: null,
         arrived_at:
           toIso(row['arrived_at'] ?? row['arrivedat']) ?? null,
@@ -238,7 +186,6 @@ export async function importBeesRoutes(
     }
   }
 
-  // ── 4. Upsert deliveries ─────────────────────────────────────
   const BATCH = 200;
   const allDeliveryIds: { id: string; tour_id: string; poc_external_id: string | null; status: string }[] = [];
 
@@ -258,52 +205,76 @@ export async function importBeesRoutes(
 
   result.deliveriesUpserted = allDeliveryIds.length;
 
-  // ── 5. Cria devoluções para POCs RESCHEDULED ─────────────────
-  const rescheduled = allDeliveryIds.filter(
-    (d) => d.status === 'RESCHEDULED'
-  );
+  // ── Inserção direta de ocorrências (sem upsert/onConflict) ──
+  const devolutionInserts: any[] = [];
 
-  if (rescheduled.length > 0) {
-    // Busca motivos do CSV para cada delivery
-    const reasonMap = new Map<string, string>();
-    for (const [extId, { rows }] of tourMap.entries()) {
-      const tourUuid = tourIdMap.get(extId);
-      if (!tourUuid) continue;
-      for (const row of rows) {
-        const pocId = row['pocexternalid'] ?? row['poc_external_id'] ?? '';
-        const reason =
-          row['lastreasonrescheduled'] ??
-          row['last_reason_rescheduled'] ?? '';
-        if (pocId && reason) {
-          reasonMap.set(`${tourUuid}|${pocId}`, reason);
+  for (const [extId, { rows }] of tourMap.entries()) {
+    const tourUuid = tourIdMap.get(extId);
+    if (!tourUuid) continue;
+
+    for (const row of rows) {
+      // ← só cria devolução para POCs com status RESCHEDULED
+      const rowStatus = String(row['status'] ?? row['Status'] ?? '')
+        .toUpperCase()
+        .trim();
+      if (rowStatus !== 'RESCHEDULED') continue;
+
+      const pocId = String(row['pocexternalid'] ?? '').trim();
+
+      const reasonCode = String(
+        row['lastreasonrescheduled'] ??
+        row['last_reason_rescheduled'] ??
+        row['skippedreason'] ??
+        row['skipped_reason'] ??
+        row['reason'] ??
+        row['Motivo'] ??
+        '00'
+      ).trim();
+
+      const reasonDesc = String(
+        row['reasondescription'] ??
+        row['reason_description'] ??
+        'Registro de parada importado via BEES'
+      );
+
+      if (pocId) {
+        const matchingDelivery = allDeliveryIds.find(
+          (d) => d.tour_id === tourUuid && d.poc_external_id === pocId
+        );
+
+        if (matchingDelivery) {
+          devolutionInserts.push({
+            delivery_id: matchingDelivery.id,
+            tour_id: tourUuid,
+            poc_external_id: pocId,
+            poc_name: null,
+            reason: reasonCode !== '' ? reasonCode : '00',
+            reason_description: reasonDesc,
+            status: 'PENDING',
+          });
         }
       }
     }
+  }
 
-    const devolutionInserts: DevolutionInsert[] = rescheduled.map((d) => {
-      const key = `${d.tour_id}|${d.poc_external_id ?? ''}`;
-      return {
-        delivery_id: d.id,
-        tour_id: d.tour_id,
-        poc_external_id: d.poc_external_id,
-        poc_name: null,
-        reason: reasonMap.get(key) || 'Não informado',
-        reason_description: null,
-        status: 'PENDING' as const,
-      };
-    });
+  let totalCreated = 0;
+  if (devolutionInserts.length > 0) {
+    for (let i = 0; i < devolutionInserts.length; i += BATCH) {
+      const chunk = devolutionInserts.slice(i, i + BATCH);
+      const { data: devData, error: devError } = await supabase
+        .from('devolutions')
+        .insert(chunk)
+        .select('id');
 
-    const { data: devData, error: devError } = await supabase
-      .from('devolutions')
-      .upsert(devolutionInserts, { onConflict: 'delivery_id' })
-      .select('id');
-
-    if (devError) {
-      result.errors.push(`Erro ao criar devoluções: ${devError.message}`);
-    } else {
-      result.devolutionsCreated = devData?.length ?? 0;
+      if (devError) {
+        console.error('Erro ao inserir lote de devoluções:', devError);
+        result.errors.push(`Erro ao criar ocorrências: ${devError.message}`);
+      } else {
+        totalCreated += devData?.length ?? 0;
+      }
     }
   }
 
+  result.devolutionsCreated = totalCreated;
   return result;
 }

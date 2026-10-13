@@ -1,63 +1,60 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../services/supabaseClient';
-import { devolutionsApi, Devolution } from '../services/api/devolutions';
+import {
+  listDevolutions,
+  createManualDevolution,
+  resolveDevolution,
+  DevolutionRow,
+} from '../services/api/devolutions';
 
 export function useDevolutions() {
-  const [devolutions, setDevolutions] = useState<Devolution[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [devolutions, setDevolutions] = useState<DevolutionRow[]>([]);
+  const [loading, setLoading]         = useState(true);
+  const [error, setError]             = useState<string | null>(null);
 
-  const fetchDevolutions = useCallback(async () => {
+  const reload = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await devolutionsApi.getAll();
-      setDevolutions(data);
+      setDevolutions(await listDevolutions());
       setError(null);
-    } catch (err: any) {
-      setError(err.message || 'Erro ao carregar devoluções');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Erro ao carregar devoluções');
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchDevolutions();
-
+    reload();
+    const channelName = `devolutions-${Date.now()}-${Math.random()}`;
     const channel = supabase
-      .channel('public:devolutions')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'devolutions' },
-        () => {
-          fetchDevolutions();
-        }
-      )
+      .channel(channelName)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devolutions' }, reload)
       .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [reload]);
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [fetchDevolutions]);
+  async function createManual(params: {
+    external_tour_id: string;
+    poc_external_id: string;
+    poc_name: string;
+    reason: string;
+    reason_description: string;
+    supervisor_comments?: string;
+  }): Promise<void> {
+    await createManualDevolution(params);
+    await reload();
+  }
 
-  const handleUpdateStatus = async (
+  async function updateStatus(
     id: string,
     status: 'APPROVED' | 'REJECTED',
     supervisorId: string,
-    comments?: string
-  ) => {
-    try {
-      await devolutionsApi.updateStatus(id, status, supervisorId, comments);
-      await fetchDevolutions();
-    } catch (err: any) {
-      throw new Error(err.message || 'Erro ao atualizar status da devolução');
-    }
-  };
+    comments: string | null
+  ): Promise<void> {
+    await resolveDevolution(id, status, supervisorId, comments);
+    await reload();
+  }
 
-  return {
-    devolutions,
-    loading,
-    error,
-    updateStatus: handleUpdateStatus,
-    refresh: fetchDevolutions,
-  };
+  return { devolutions, loading, error, refresh: reload, createManual, updateStatus };
 }
