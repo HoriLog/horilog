@@ -1,36 +1,34 @@
 import React, { useState, useEffect } from 'react';
-import { MonitoramentoArea } from './types';
-import { Sidebar } from './components/layout/Sidebar';
-import { Header } from './components/layout/Header';
-import { GestaoEntregasScreen } from './components/screens/GestaoEntregasScreen';
+import { Sidebar }               from './components/layout/Sidebar';
+import { Header }                from './components/layout/Header';
+import { GestaoBufferScreen }    from './components/screens/GestaoBufferScreen';
+import { GestaoEntregasScreen }  from './components/screens/GestaoEntregasScreen';
 import { GestaoDevolucaoScreen } from './components/screens/GestaoDevolucaoScreen';
-import { GestaoBufferScreen } from './components/screens/GestaoBufferScreen';
-import { CadastrosScreen } from './components/screens/CadastrosScreen';
-import { GestaoFrota } from './components/screens/GestaoFrota';
-import { useAuth } from './hooks/useAuth';
-import { LoginScreen } from './components/auth/LoginScreen';
-import { LoadingScreen } from './components/LoadingScreen';
-import { Loader2 } from 'lucide-react';
+import { CadastrosScreen }       from './components/screens/CadastrosScreen';
+import { ConfiguracoesScreen }   from './components/screens/Configuracoes';
+import { useAuth }               from './hooks/useAuth';
+import { LoginScreen }           from './components/auth/LoginScreen';
+import { LoadingScreen }         from './components/LoadingScreen';
+import { Loader2 }               from 'lucide-react';
 
 export default function App() {
   const { isAuthenticated, loading: authLoading } = useAuth();
 
-  const [minLoadingDone, setMinLoadingDone] = useState(false);
+  const [minLoadingDone,     setMinLoadingDone]     = useState(false);
+  const [activeArea,         setActiveArea]         = useState('cadastros');
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isSidebarCollapsed,  setIsSidebarCollapsed]  = useState(false);
+
   useEffect(() => {
-    const timer = setTimeout(() => setMinLoadingDone(true), 2500);
-    return () => clearTimeout(timer);
+    const t = setTimeout(() => setMinLoadingDone(true), 2500);
+    return () => clearTimeout(t);
   }, []);
 
-  const [activeArea, setActiveArea] = useState<string>('gestao-entregas');
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-
-  // Ctrl+B — recolhe sidebar
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
         e.preventDefault();
-        setIsSidebarCollapsed(prev => !prev);
+        setIsSidebarCollapsed(p => !p);
       }
     };
     window.addEventListener('keydown', handler);
@@ -39,42 +37,39 @@ export default function App() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-[#F8FAFC] flex items-center justify-center">
-        <Loader2 className="w-6 h-6 text-[#004AC6] animate-spin" />
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <Loader2 className="w-6 h-6 animate-spin" style={{ color: '#0D4E96' }} />
       </div>
     );
   }
 
   if (!isAuthenticated) return <LoginScreen />;
-  if (!minLoadingDone) return <LoadingScreen />;
+  if (!minLoadingDone)  return <LoadingScreen />;
 
   return (
-    <div className="flex h-screen bg-[#F8FAFC] overflow-hidden">
+    <div className="flex h-screen bg-slate-100 overflow-hidden">
       <Sidebar
         activeTab={activeArea}
-        onSelectTab={(tab) => setActiveArea(tab)}
+        onSelectTab={setActiveArea}
         isOpenMobile={isMobileSidebarOpen}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
         isCollapsed={isSidebarCollapsed}
-        onToggleCollapse={() => setIsSidebarCollapsed(prev => !prev)}
+        onToggleCollapse={() => setIsSidebarCollapsed(p => !p)}
       />
 
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-        {/* Forçamos activeTab com 'as any' para evitar conflito com o TabId estrito do Header */}
         <Header
           activeTab={activeArea as any}
           onToggleMobileSidebar={() => setIsMobileSidebarOpen(true)}
           isSidebarCollapsed={isSidebarCollapsed}
         />
 
-        <main className="flex-1 overflow-y-auto p-6 space-y-6">
-          <div className="w-full">
-            {activeArea === 'buffer' && <GestaoBufferScreen />}
-            {activeArea === 'gestao-entregas' && <GestaoEntregasScreen />}
-            {activeArea === 'gestao-devolucao' && <GestaoDevolucaoScreen />}
-            {activeArea === 'frota' && <GestaoFrota />}
-            {activeArea === 'cadastros' && <CadastrosScreen />}
-          </div>
+        <main className="flex-1 overflow-y-auto p-6">
+          {activeArea === 'cadastros'        && <CadastrosScreen />}
+          {activeArea === 'buffer'           && <GestaoBufferScreen />}
+          {activeArea === 'gestao-entregas'  && <GestaoEntregasScreen />}
+          {activeArea === 'gestao-devolucao' && <GestaoDevolucaoScreen />}
+          {activeArea === 'configuracoes'    && <ConfiguracoesScreen />}
         </main>
       </div>
     </div>

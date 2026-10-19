@@ -23,8 +23,8 @@ export function Header({ activeTab, onToggleMobileSidebar }: HeaderProps) {
   };
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 px-6 flex items-center justify-between shrink-0 shadow-xs z-20">
-      {/* Esquerda: Botão mobile + Título dinâmico da aba */}
+    <header className="h-16 bg-white border-b border-slate-200 px-6 flex items-center justify-between shrink-0 shadow-xs w-full">
+      {/* Esquerda: Menu mobile + Título da aba ativa */}
       <div className="flex items-center gap-4">
         <button
           onClick={onToggleMobileSidebar}
@@ -44,9 +44,8 @@ export function Header({ activeTab, onToggleMobileSidebar }: HeaderProps) {
         </div>
       </div>
 
-      {/* Direita: Pesquisa rápida + Perfil do usuário logado */}
+      {/* Direita: Pesquisa e Perfil */}
       <div className="flex items-center gap-4">
-        {/* Barra de busca global opcional */}
         <div className="hidden xl:flex items-center relative w-64">
           <Search className="absolute left-3.5 w-4 h-4 text-slate-400" />
           <input
@@ -74,7 +73,7 @@ export function Header({ activeTab, onToggleMobileSidebar }: HeaderProps) {
               {profile?.fullName || 'Operador Logístico'}
             </span>
             <span className="text-[10px] text-slate-400 capitalize">
-              {profile?.role || 'CDD Caruaru'}
+              {profile?.role || 'Gerencia'}
             </span>
           </div>
         </div>
