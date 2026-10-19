@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Plus,
   Calendar,
@@ -7,19 +7,24 @@ import {
   Trash2,
   MessageSquare,
   Search,
-  Filter,
   AlertTriangle,
   Send,
   User,
   FileText,
   CheckSquare,
   Square,
-  Upload
+  Upload,
 } from 'lucide-react';
-import { useBuffer } from '../../hooks/useBuffer';
-import { useAuth } from '../../hooks/useAuth';
+import { useBuffer }           from '../../hooks/useBuffer';
+import { useContacts }         from '../../hooks/useContacts';
+import { useAuth }             from '../../hooks/useAuth';
+import { usePermissions }      from '../../hooks/usePermissions';
+import { parseBufferReport }   from '../../services/importBufferReport';
 import type { BufferEntry, BufferStatus } from '../../types';
-import { orDash } from '../../utils/format';
+import type { Contact }        from '../../services/api/contacts';
+import { orDash }              from '../../utils/format';
+
+// ─── Tipos e constantes ───────────────────────────────────────────────────────
 
 type StatusFilter = 'ALL' | BufferStatus;
 
@@ -36,20 +41,6 @@ const STATUS_COLORS: Record<BufferStatus, string> = {
   DELIVERED: 'bg-emerald-50 text-emerald-700 border border-emerald-200/80 font-medium',
   CANCELLED: 'bg-slate-100 text-slate-500 border border-slate-200 font-medium',
 };
-
-// ── Contatos Reais de Supervisores / Operação (CDD Caruaru) ──
-interface LogisticsContact {
-  id: string;
-  name: string;
-  role: string;
-  phone: string; // Formato internacional sem símbolos, ex: 5581999999999
-}
-
-const LOGISTICS_CONTACTS: LogisticsContact[] = [
-  { id: '1', name: 'Felipe Ferreira (Supervisão Operacional)', role: 'Supervisor', phone: '5581996268171' },
-  { id: '2', name: 'Supervisão de Logística - CDD Caruaru', role: 'Logística', phone: '5581988882222' },
-  { id: '3', name: 'Equipe Comercial / Vendas', role: 'Comercial', phone: '5581988883333' },
-];
 
 interface FormState {
   poc_external_id: string;
@@ -74,11 +65,13 @@ const EMPTY_FORM: FormState = {
 const INPUT_CLASS =
   'w-full bg-slate-50/70 border border-slate-200 rounded-xl px-4 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 focus:outline-none transition-all duration-200';
 
+// ─── Componente principal ─────────────────────────────────────────────────────
+
 export function GestaoBufferScreen() {
-  const { entries, loading, error, addEntry, editEntry, removeEntry } = useBuffer();
-  const { profile } = useAuth();
-  const isSupervisor =
-    profile?.role === 'supervisor' || profile?.role === 'gerencia';
+  const { entries, loading, refreshing, error, addEntry, editEntry, removeEntry } = useBuffer();
+  const { contacts }  = useContacts();
+  const { profile }   = useAuth();
+  const { can }       = usePermissions();
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
   const [search,       setSearch]       = useState('');
@@ -86,18 +79,27 @@ export function GestaoBufferScreen() {
   const [form,         setForm]         = useState<FormState>(EMPTY_FORM);
   const [saving,       setSaving]       = useState(false);
 
-  // Seleção por Checkbox
+  // Seleção por checkbox
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  // Estados do Modal de Alertas do WhatsApp e Edição de Mensagem
+  // WhatsApp modal
   const [isWhatsAppModalOpen, setIsWhatsAppModalOpen] = useState(false);
-  const [selectedContact, setSelectedContact]         = useState<LogisticsContact>(LOGISTICS_CONTACTS[0]);
-  const [messageTemplate, setMessageTemplate]         = useState<'standard' | 'urgent' | 'summary'>('standard');
-  const [editableMessage, setEditableMessage]         = useState('');
+  const [selectedContact,     setSelectedContact]     = useState<Contact | null>(null);
+  const [messageTemplate,     setMessageTemplate]     = useState<'standard' | 'urgent' | 'summary'>('standard');
+  const [editableMessage,     setEditableMessage]     = useState('');
 
-  // Schedule sub-modal
+  // Agenda sub-modal
   const [scheduleTarget, setScheduleTarget] = useState<BufferEntry | null>(null);
   const [scheduledDate,  setScheduledDate]  = useState('');
+
+  // Inicializa contato selecionado quando contacts carrega — Fix 1
+  useEffect(() => {
+    if (contacts.length > 0 && !selectedContact) {
+      setSelectedContact(contacts[0]);
+    }
+  }, [contacts, selectedContact]);
+
+  // ── Dados filtrados ─────────────────────────────────────────────────────────
 
   const filtered = entries.filter(e => {
     const matchStatus = statusFilter === 'ALL' || e.status === statusFilter;
@@ -115,114 +117,91 @@ export function GestaoBufferScreen() {
     delivered: entries.filter(e => e.status === 'DELIVERED').length,
   };
 
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+
   function fmtDate(iso: string | null): string {
     if (!iso) return '—';
     const [y, m, d] = iso.split('-');
     return `${d}/${m}/${y}`;
   }
 
-  // ── Tratamento do ID do cliente (Remover prefixo 598) ──
-  function formatPocExternalId(rawId: string): string {
-    const trimmed = String(rawId || '').trim();
-    if (trimmed.startsWith('598') && trimmed.length > 3) {
-      return trimmed.substring(3);
-    }
-    return trimmed;
-  }
+  // ── Importação CSV via serviço — Fix 2 ─────────────────────────────────────
 
-  // ── Leitor e Importador do Relatório CSV de Pedidos ──
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const text = event.target?.result as string;
-      if (!text) return;
+    const text = await file.text();
+    const { rows, errors } = parseBufferReport(text);
 
-      const lines = text.split('\n');
-      let successCount = 0;
+    if (errors.length > 0) console.warn('Avisos de importação:', errors);
 
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-
-        const cols = line.split(';');
-        if (cols.length >= 11) {
-          const rawCode = cols[9]?.replace(/"/g, '') || '';
-          const pocName = cols[10]?.replace(/"/g, '') || 'Cliente sem Nome';
-          const volumeStr = cols[2]?.replace(/"/g, '').replace(',', '.') || '0';
-          const reasonStr = cols[5]?.replace(/"/g, '') || 'Importado via Relatório';
-
-          const pocExternalId = formatPocExternalId(rawCode);
-          const volumeHl = parseFloat(volumeStr) || null;
-
-          if (pocExternalId && pocName) {
-            try {
-              await addEntry({
-                poc_external_id: pocExternalId,
-                poc_name: pocName,
-                original_date: new Date().toISOString().slice(0, 10),
-                scheduled_date: null,
-                volume_hl: volumeHl,
-                reason: reasonStr,
-                notes: 'Importado via relatório CSV de pedidos',
-                status: 'PENDING',
-                assigned_tour_id: null,
-                created_by: profile?.id ?? null,
-              });
-              successCount++;
-            } catch (err) {
-              console.error('Erro ao cadastrar entrada do relatório:', err);
-            }
-          }
-        }
+    let count = 0;
+    for (const row of rows) {
+      try {
+        await addEntry({
+          poc_external_id:  row.pocExternalId,
+          poc_name:         row.pocName,
+          original_date:    new Date().toISOString().slice(0, 10),
+          scheduled_date:   null,
+          volume_hl:        row.volumeHl,
+          reason:           row.reason,
+          notes:            'Importado via relatório CSV',
+          status:           'PENDING',
+          assigned_tour_id: null,
+          created_by:       profile?.id ?? null,
+        });
+        count++;
+      } catch (err) {
+        console.error('Erro ao importar linha:', err);
       }
-      alert(`${successCount} registro(s) importado(s) para o Buffer com sucesso!`);
-      e.target.value = '';
-    };
-    reader.readAsText(file, 'latin1');
+    }
+
+    alert(
+      `${count} registro(s) importado(s).` +
+      (errors.length ? `\n${errors.length} linha(s) ignorada(s).` : '')
+    );
+    e.target.value = '';
   }
 
-  // ── Gerador de Texto Operacional para WhatsApp baseado nas seleções ──
-  function generateLogisticsMessage(templateType: 'standard' | 'urgent' | 'summary'): string {
-    const targetEntries = selectedIds.length > 0
+  // ── Gerador de mensagem WhatsApp ────────────────────────────────────────────
+
+  function generateLogisticsMessage(type: 'standard' | 'urgent' | 'summary'): string {
+    const targets = selectedIds.length > 0
       ? entries.filter(e => selectedIds.includes(e.id))
-      : (filtered.length > 0 ? filtered : entries);
+      : filtered;
+    const today = new Date().toLocaleDateString('pt-BR');
 
-    const todayStr = new Date().toLocaleDateString('pt-BR');
-
-    if (templateType === 'urgent') {
-      let text = `🚨 *URGENTE: Alerta de Buffer HoriLog (CDD Caruaru)* 🚚\nData: ${todayStr}\n\n`;
-      text += `Atenção equipe, existem *${targetEntries.length}* cliente(s) selecionados exigindo tratativa imediata:\n\n`;
-      targetEntries.filter(e => e.status === 'PENDING').slice(0, 10).forEach((e, idx) => {
-        text += `${idx + 1}. *[PDV ${e.poc_external_id}]* ${e.poc_name}\n`;
+    if (type === 'urgent') {
+      let t = `🚨 *URGENTE: Alerta de Buffer HoriLog (CDD Caruaru)* 🚚\nData: ${today}\n\n`;
+      t += `*${targets.length}* cliente(s) exigindo tratativa imediata:\n\n`;
+      targets.filter(e => e.status === 'PENDING').slice(0, 10).forEach((e, i) => {
+        t += `${i + 1}. *[PDV ${e.poc_external_id}]* ${e.poc_name}\n`;
       });
-      text += `\n_Favor verificar no sistema o quanto antes._`;
-      return text;
+      t += `\n_Favor verificar no sistema o quanto antes._`;
+      return t;
     }
 
-    if (templateType === 'summary') {
-      let totalVol = targetEntries.reduce((acc, curr) => acc + (curr.volume_hl || 0), 0);
-      let text = `📊 *Resumo Operacional - Buffer CDD Caruaru* 📈\nData: ${todayStr}\n\n`;
-      text += `• Total de PDVs Selecionados: *${targetEntries.length}*\n`;
-      text += `• Volume Total Acumulado: *${totalVol.toFixed(2)} hl*\n\n`;
-      text += `_Relatório gerado via HoriLog ERP Enterprise._`;
-      return text;
+    if (type === 'summary') {
+      const totalVol = targets.reduce((acc, e) => acc + (e.volume_hl ?? 0), 0);
+      let t = `📊 *Resumo Operacional - Buffer CDD Caruaru* 📈\nData: ${today}\n\n`;
+      t += `• Total de PDVs: *${targets.length}*\n`;
+      t += `• Volume Total: *${totalVol.toFixed(2)} hl*\n\n`;
+      t += `_Relatório gerado via HoriLog ERP._`;
+      return t;
     }
 
-    // Padrão (Standard)
-    let text = `*HoriLog — Relatório de Clientes em Buffer (CDD Caruaru)* 🚚\nData: ${todayStr}\n\n`;
-    text += `📋 Segue a relação dos clientes selecionados para tratativa:\n\n`;
-    targetEntries.forEach((e, idx) => {
-      text += `${idx + 1}. *[PDV ${e.poc_external_id}]* ${e.poc_name}\n`;
-      text += `   - Status: ${STATUS_LABELS[e.status]}\n`;
-      if (e.original_date) text += `   - Data Original: ${fmtDate(e.original_date)}\n`;
-      if (e.reason) text += `   - Motivo: ${e.reason}\n`;
-      text += `\n`;
+    let t = `*HoriLog — Buffer CDD Caruaru* 🚚\nData: ${today}\n\n`;
+    t += `📋 Clientes para tratativa:\n\n`;
+    targets.forEach((e, i) => {
+      t += `${i + 1}. *[PDV ${e.poc_external_id}]* ${e.poc_name}\n`;
+      t += `   - Status: ${STATUS_LABELS[e.status]}\n`;
+      if (e.original_date) t += `   - Data: ${fmtDate(e.original_date)}\n`;
+      if (e.reason)        t += `   - Motivo: ${e.reason}\n`;
+      t += `\n`;
     });
-    text += `_Favor priorizar o alinhamento comercial e logístico._`;
-    return text;
+    t += `_Favor priorizar o alinhamento comercial e logístico._`;
+    return t;
   }
 
   function handleSelectTemplate(type: 'standard' | 'urgent' | 'summary') {
@@ -237,19 +216,18 @@ export function GestaoBufferScreen() {
   }
 
   function handleSendWhatsApp() {
+    if (!selectedContact) return;
     const encoded = encodeURIComponent(editableMessage);
-    const phone = selectedContact.phone;
-    window.open(`https://api.whatsapp.com/send?phone=${phone}&text=${encoded}`, '_blank');
+    window.open(`https://api.whatsapp.com/send?phone=${selectedContact.phone}&text=${encoded}`, '_blank');
     setIsWhatsAppModalOpen(false);
   }
 
-  // Checkbox helpers
+  // ── Checkbox ────────────────────────────────────────────────────────────────
+
   function toggleSelectAll() {
-    if (selectedIds.length === filtered.length) {
-      setSelectedIds([]);
-    } else {
-      setSelectedIds(filtered.map(e => e.id));
-    }
+    setSelectedIds(
+      selectedIds.length === filtered.length ? [] : filtered.map(e => e.id)
+    );
   }
 
   function toggleSelectOne(id: string) {
@@ -258,22 +236,23 @@ export function GestaoBufferScreen() {
     );
   }
 
+  // ── CRUD ────────────────────────────────────────────────────────────────────
+
   async function handleSubmit() {
     if (!form.poc_external_id.trim() || !form.poc_name.trim() || !form.original_date) return;
     setSaving(true);
     try {
-      const cleanId = formatPocExternalId(form.poc_external_id);
       await addEntry({
-        poc_external_id: cleanId,
-        poc_name:        form.poc_name.trim(),
-        original_date:   form.original_date,
-        scheduled_date:  form.scheduled_date || null,
-        volume_hl:       form.volume_hl ? parseFloat(form.volume_hl) : null,
-        reason:          form.reason.trim() || null,
-        notes:           form.notes.trim() || null,
-        status:          form.scheduled_date ? 'SCHEDULED' : 'PENDING',
+        poc_external_id:  form.poc_external_id.trim(),
+        poc_name:         form.poc_name.trim(),
+        original_date:    form.original_date,
+        scheduled_date:   form.scheduled_date || null,
+        volume_hl:        form.volume_hl ? parseFloat(form.volume_hl) : null,
+        reason:           form.reason.trim() || null,
+        notes:            form.notes.trim() || null,
+        status:           form.scheduled_date ? 'SCHEDULED' : 'PENDING',
         assigned_tour_id: null,
-        created_by:      profile?.id ?? null,
+        created_by:       profile?.id ?? null,
       });
       setForm(EMPTY_FORM);
       setShowForm(false);
@@ -306,63 +285,75 @@ export function GestaoBufferScreen() {
     await removeEntry(id);
   }
 
+  // ── Render guards ───────────────────────────────────────────────────────────
+
   if (loading) return <Spinner />;
   if (error)   return <p className="p-6 text-sm text-rose-600 font-medium">{error}</p>;
+
+  // ── JSX ─────────────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-6 pb-12">
 
-      {/* ── Header Corporativo HoriLog ── */}
+      {/* ── Header ── */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs">
         <div>
           <div className="flex items-center gap-2">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-orange-500 animate-pulse" />
-            <span className="text-xs font-bold uppercase tracking-wider text-orange-600">HoriLog — CDD Caruaru</span>
+            <span className="text-xs font-bold uppercase tracking-wider text-orange-600">
+              HoriLog — CDD Caruaru
+              {refreshing && <span className="ml-2 text-slate-400 normal-case font-normal">atualizando...</span>}
+            </span>
           </div>
           <h1 className="text-2xl font-bold text-slate-900 mt-1 tracking-tight">Buffer de Entregas</h1>
           <p className="text-sm text-slate-500 mt-0.5">POCs sem mapa atribuído — aguardando reagendamento ou rota</p>
         </div>
+
         <div className="flex flex-wrap items-center gap-3">
-          <label className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all shadow-xs cursor-pointer">
-            <Upload className="w-4 h-4 text-orange-600" />
-            Importar Relatório
-            <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
-          </label>
+          {can('buffer', 'create') && (
+            <label className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all shadow-xs cursor-pointer">
+              <Upload className="w-4 h-4 text-orange-600" />
+              Importar Relatório
+              <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+            </label>
+          )}
 
           <button
             onClick={handleOpenWhatsAppModal}
             className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl hover:bg-emerald-100 transition-all shadow-xs"
           >
             <MessageSquare className="w-4 h-4 text-emerald-600" />
-            Enviar Buffer {selectedIds.length > 0 ? `(${selectedIds.length} selecionados)` : '(Todos)'}
+            Enviar Buffer {selectedIds.length > 0 ? `(${selectedIds.length})` : '(Todos)'}
           </button>
 
-          <button
-            onClick={() => setShowForm(true)}
-            className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-orange-500 to-amber-600 rounded-xl hover:from-orange-600 hover:to-amber-700 transition-all shadow-sm shadow-orange-500/20"
-          >
-            <Plus className="w-4 h-4" />
-            Adicionar ao Buffer
-          </button>
+          {can('buffer', 'create') && (
+            <button
+              onClick={() => setShowForm(true)}
+              className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-orange-500 to-amber-600 rounded-xl hover:from-orange-600 hover:to-amber-700 transition-all shadow-sm shadow-orange-500/20"
+            >
+              <Plus className="w-4 h-4" />
+              Adicionar ao Buffer
+            </button>
+          )}
         </div>
       </div>
 
-      {/* ── KPIs Modernos ── */}
+      {/* ── KPIs ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: 'Total no Buffer', value: counts.total,     cardBg: 'bg-white border-slate-200/80', textNum: 'text-slate-900' },
-          { label: 'Pendentes',       value: counts.pending,   cardBg: 'bg-white border-amber-200/80', textNum: 'text-amber-700' },
-          { label: 'Agendados',       value: counts.scheduled, cardBg: 'bg-white border-indigo-200/80', textNum: 'text-indigo-700' },
-          { label: 'Entregues',       value: counts.delivered, cardBg: 'bg-white border-emerald-200/80', textNum: 'text-emerald-700' },
+          { label: 'Total no Buffer', value: counts.total,     border: 'border-slate-200/80',   text: 'text-slate-900'   },
+          { label: 'Pendentes',       value: counts.pending,   border: 'border-amber-200/80',   text: 'text-amber-700'   },
+          { label: 'Agendados',       value: counts.scheduled, border: 'border-indigo-200/80',  text: 'text-indigo-700'  },
+          { label: 'Entregues',       value: counts.delivered, border: 'border-emerald-200/80', text: 'text-emerald-700' },
         ].map(k => (
-          <div key={k.label} className={`rounded-2xl p-5 border ${k.cardBg} shadow-xs transition-all hover:shadow-md`}>
+          <div key={k.label} className={`rounded-2xl p-5 bg-white border ${k.border} shadow-xs`}>
             <p className="text-xs font-medium text-slate-500 mb-2">{k.label}</p>
-            <p className={`text-3xl font-extrabold tracking-tight ${k.textNum}`}>{k.value}</p>
+            <p className={`text-3xl font-extrabold tracking-tight ${k.text}`}>{k.value}</p>
           </div>
         ))}
       </div>
 
-      {/* ── Filtros e Barra de Busca ── */}
+      {/* ── Filtros ── */}
       <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="flex flex-wrap bg-slate-100/80 rounded-xl p-1 gap-1 w-full md:w-auto">
           {(['ALL', 'PENDING', 'SCHEDULED', 'DELIVERED', 'CANCELLED'] as const).map(s => (
@@ -391,7 +382,7 @@ export function GestaoBufferScreen() {
         </div>
       </div>
 
-      {/* ── Tabela com Checkboxes ── */}
+      {/* ── Tabela ── */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
         {filtered.length === 0 ? (
           <div className="text-center py-16 space-y-2">
@@ -409,11 +400,9 @@ export function GestaoBufferScreen() {
                 <tr className="bg-slate-50/80 border-b border-slate-200/80 text-slate-500 text-[11px] font-bold uppercase tracking-wider">
                   <th className="px-4 py-3.5 w-10 text-center">
                     <button onClick={toggleSelectAll} className="text-slate-500 hover:text-slate-800">
-                      {selectedIds.length === filtered.length && filtered.length > 0 ? (
-                        <CheckSquare className="w-4 h-4 text-orange-600" />
-                      ) : (
-                        <Square className="w-4 h-4" />
-                      )}
+                      {selectedIds.length === filtered.length && filtered.length > 0
+                        ? <CheckSquare className="w-4 h-4 text-orange-600" />
+                        : <Square className="w-4 h-4" />}
                     </button>
                   </th>
                   <th className="px-4 py-3.5">POC</th>
@@ -432,11 +421,9 @@ export function GestaoBufferScreen() {
                     <tr key={entry.id} className={`hover:bg-slate-50/70 transition-colors ${isSelected ? 'bg-orange-50/40' : ''}`}>
                       <td className="px-4 py-4 text-center">
                         <button onClick={() => toggleSelectOne(entry.id)} className="text-slate-400 hover:text-slate-700">
-                          {isSelected ? (
-                            <CheckSquare className="w-4 h-4 text-orange-600" />
-                          ) : (
-                            <Square className="w-4 h-4" />
-                          )}
+                          {isSelected
+                            ? <CheckSquare className="w-4 h-4 text-orange-600" />
+                            : <Square className="w-4 h-4" />}
                         </button>
                       </td>
                       <td className="px-4 py-4">
@@ -447,12 +434,12 @@ export function GestaoBufferScreen() {
                       <td className="px-4 py-4 text-slate-600 font-medium">
                         {entry.scheduled_date
                           ? fmtDate(entry.scheduled_date)
-                          : <span className="text-slate-300 font-medium">—</span>}
+                          : <span className="text-slate-300">—</span>}
                       </td>
                       <td className="px-4 py-4 text-slate-600 font-medium">
                         {entry.volume_hl != null
                           ? entry.volume_hl.toFixed(3)
-                          : <span className="text-slate-300 font-medium">—</span>}
+                          : <span className="text-slate-300">—</span>}
                       </td>
                       <td className="px-4 py-4 text-slate-600 max-w-xs truncate">{orDash(entry.reason)}</td>
                       <td className="px-4 py-4">
@@ -462,7 +449,7 @@ export function GestaoBufferScreen() {
                       </td>
                       <td className="px-4 py-4 text-right">
                         <div className="flex items-center gap-1.5 justify-end">
-                          {entry.status === 'PENDING' && (
+                          {can('buffer', 'update') && entry.status === 'PENDING' && (
                             <IconBtn
                               icon={<Calendar className="w-4 h-4" />}
                               title="Agendar"
@@ -470,7 +457,7 @@ export function GestaoBufferScreen() {
                               onClick={() => { setScheduleTarget(entry); setScheduledDate(''); }}
                             />
                           )}
-                          {(entry.status === 'PENDING' || entry.status === 'SCHEDULED') && (
+                          {can('buffer', 'update') && (entry.status === 'PENDING' || entry.status === 'SCHEDULED') && (
                             <IconBtn
                               icon={<CheckCircle className="w-4 h-4" />}
                               title="Marcar como Entregue"
@@ -478,7 +465,7 @@ export function GestaoBufferScreen() {
                               onClick={() => handleDeliver(entry)}
                             />
                           )}
-                          {entry.status !== 'CANCELLED' && entry.status !== 'DELIVERED' && (
+                          {can('buffer', 'update') && entry.status !== 'CANCELLED' && entry.status !== 'DELIVERED' && (
                             <IconBtn
                               icon={<XCircle className="w-4 h-4" />}
                               title="Cancelar"
@@ -486,7 +473,7 @@ export function GestaoBufferScreen() {
                               onClick={() => handleCancel(entry)}
                             />
                           )}
-                          {isSupervisor && (
+                          {can('buffer', 'delete') && (
                             <IconBtn
                               icon={<Trash2 className="w-4 h-4" />}
                               title="Remover"
@@ -505,40 +492,43 @@ export function GestaoBufferScreen() {
         )}
       </div>
 
-      {/* ── Modal: Central de Disparo de WhatsApp com Mensagem Editável ── */}
+      {/* ── Modal: WhatsApp ── */}
       {isWhatsAppModalOpen && (
-        <Modal title="Central de Disparo de WhatsApp" onClose={() => setIsWhatsAppModalOpen(false)}>
+        <Modal title="Central de Disparo — WhatsApp" onClose={() => setIsWhatsAppModalOpen(false)}>
           <div className="space-y-4">
             <div>
-              <label className="text-xs font-semibold text-slate-700 block mb-1.5 flex items-center gap-1.5">
-                <User className="w-3.5 h-3.5 text-emerald-600" /> Selecionar Contato Destinatário *
+              <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5 mb-1.5">
+                <User className="w-3.5 h-3.5 text-emerald-600" /> Contato destinatário
               </label>
               <select
                 className={INPUT_CLASS}
-                value={selectedContact.id}
+                value={selectedContact?.id ?? ''}
                 onChange={e => {
-                  const found = LOGISTICS_CONTACTS.find(c => c.id === e.target.value);
+                  const found = contacts.find(c => c.id === e.target.value);
                   if (found) setSelectedContact(found);
                 }}
               >
-                {LOGISTICS_CONTACTS.map(c => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} — [{c.role}] ({c.phone})
-                  </option>
-                ))}
+                {contacts.length === 0
+                  ? <option value="">Carregando contatos...</option>
+                  : contacts.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} — [{c.role}]
+                    </option>
+                  ))
+                }
               </select>
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-slate-700 block mb-1.5 flex items-center gap-1.5">
-                <FileText className="w-3.5 h-3.5 text-orange-600" /> Template de Mensagem Padronizada
+              <label className="text-xs font-semibold text-slate-700 flex items-center gap-1.5 mb-1.5">
+                <FileText className="w-3.5 h-3.5 text-orange-600" /> Template
               </label>
               <div className="grid grid-cols-3 gap-2">
-                {[
-                  { key: 'standard' as const, label: 'Lista Completa' },
-                  { key: 'urgent'   as const, label: 'Alerta Urgente' },
+                {([
+                  { key: 'standard' as const, label: 'Lista Completa'     },
+                  { key: 'urgent'   as const, label: 'Alerta Urgente'     },
                   { key: 'summary'  as const, label: 'Resumo Operacional' },
-                ].map(t => (
+                ]).map(t => (
                   <button
                     key={t.key}
                     type="button"
@@ -557,7 +547,7 @@ export function GestaoBufferScreen() {
 
             <div>
               <label className="text-xs font-semibold text-slate-700 block mb-1.5">
-                Mensagem {selectedIds.length > 0 ? `(${selectedIds.length} itens selecionados)` : '(Todos os filtrados)'} - Editável
+                Mensagem {selectedIds.length > 0 ? `(${selectedIds.length} selecionados)` : '(todos os filtrados)'} — editável
               </label>
               <textarea
                 className="w-full bg-white border border-slate-300 rounded-xl p-3.5 text-xs text-slate-900 font-mono focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 focus:outline-none transition-all resize-none shadow-2xs"
@@ -570,7 +560,8 @@ export function GestaoBufferScreen() {
             <div className="flex gap-3 pt-2">
               <button
                 onClick={handleSendWhatsApp}
-                className="flex-1 bg-emerald-600 text-white py-2.5 rounded-xl text-sm font-semibold hover:bg-emerald-700 transition-all shadow-sm shadow-emerald-600/25 flex items-center justify-center gap-2"
+                disabled={!selectedContact}
+                className="flex-1 bg-emerald-600 text-white py-2.5 rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50 transition-all shadow-sm flex items-center justify-center gap-2"
               >
                 <Send className="w-4 h-4" /> Disparar no WhatsApp
               </button>
@@ -585,20 +576,18 @@ export function GestaoBufferScreen() {
         </Modal>
       )}
 
-      {/* ── Modal: Adicionar Manualmente ── */}
+      {/* ── Modal: Adicionar manualmente ── */}
       {showForm && (
         <Modal title="Adicionar ao Buffer" onClose={() => { setShowForm(false); setForm(EMPTY_FORM); }}>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <Field label="ID do POC *">
-                <input className={INPUT_CLASS} value={form.poc_external_id}
-                  onChange={e => setForm(p => ({ ...p, poc_external_id: e.target.value }))}
-                  placeholder="Ex: 99536" />
+                <input className={INPUT_CLASS} value={form.poc_external_id} placeholder="Ex: 99536"
+                  onChange={e => setForm(p => ({ ...p, poc_external_id: e.target.value }))} />
               </Field>
               <Field label="Nome do POC *">
-                <input className={INPUT_CLASS} value={form.poc_name}
-                  onChange={e => setForm(p => ({ ...p, poc_name: e.target.value }))}
-                  placeholder="Nome do estabelecimento" />
+                <input className={INPUT_CLASS} value={form.poc_name} placeholder="Nome do estabelecimento"
+                  onChange={e => setForm(p => ({ ...p, poc_name: e.target.value }))} />
               </Field>
             </div>
             <div className="grid grid-cols-2 gap-4">
@@ -607,8 +596,7 @@ export function GestaoBufferScreen() {
                   onChange={e => setForm(p => ({ ...p, original_date: e.target.value }))} />
               </Field>
               <Field label="Agendar para">
-                <input type="date" className={INPUT_CLASS} value={form.scheduled_date}
-                  min={form.original_date}
+                <input type="date" className={INPUT_CLASS} value={form.scheduled_date} min={form.original_date}
                   onChange={e => setForm(p => ({ ...p, scheduled_date: e.target.value }))} />
               </Field>
             </div>
@@ -619,8 +607,7 @@ export function GestaoBufferScreen() {
                   onChange={e => setForm(p => ({ ...p, volume_hl: e.target.value }))} />
               </Field>
               <Field label="Motivo">
-                <input className={INPUT_CLASS} value={form.reason}
-                  placeholder="Ex: Prioridade Alta - Reprogramado"
+                <input className={INPUT_CLASS} value={form.reason} placeholder="Ex: Alta demanda"
                   onChange={e => setForm(p => ({ ...p, reason: e.target.value }))} />
               </Field>
             </div>
@@ -630,10 +617,8 @@ export function GestaoBufferScreen() {
                 onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} />
             </Field>
             <ModalActions
-              onConfirm={handleSubmit}
-              onCancel={() => { setShowForm(false); setForm(EMPTY_FORM); }}
-              saving={saving}
-              disabled={!form.poc_external_id.trim() || !form.poc_name.trim()}
+              onConfirm={handleSubmit} onCancel={() => { setShowForm(false); setForm(EMPTY_FORM); }}
+              saving={saving} disabled={!form.poc_external_id.trim() || !form.poc_name.trim()}
               confirmLabel="Salvar"
             />
           </div>
@@ -642,25 +627,17 @@ export function GestaoBufferScreen() {
 
       {/* ── Modal: Agendar ── */}
       {scheduleTarget && (
-        <Modal
-          title={`Agendar — ${scheduleTarget.poc_name}`}
-          onClose={() => setScheduleTarget(null)}
-        >
+        <Modal title={`Agendar — ${scheduleTarget.poc_name}`} onClose={() => setScheduleTarget(null)}>
           <div className="space-y-4">
-            <p className="text-sm text-slate-500">
-              Defina a data em que este POC será atendido.
-            </p>
+            <p className="text-sm text-slate-500">Defina a data em que este POC será atendido.</p>
             <Field label="Data agendada *">
               <input type="date" className={INPUT_CLASS} value={scheduledDate}
                 min={new Date().toISOString().slice(0, 10)}
                 onChange={e => setScheduledDate(e.target.value)} />
             </Field>
             <ModalActions
-              onConfirm={handleSchedule}
-              onCancel={() => setScheduleTarget(null)}
-              saving={saving}
-              disabled={!scheduledDate}
-              confirmLabel="Confirmar agendamento"
+              onConfirm={handleSchedule} onCancel={() => setScheduleTarget(null)}
+              saving={saving} disabled={!scheduledDate} confirmLabel="Confirmar agendamento"
             />
           </div>
         </Modal>
@@ -669,7 +646,7 @@ export function GestaoBufferScreen() {
   );
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Sub-componentes ──────────────────────────────────────────────────────────
 
 function Spinner() {
   return (
@@ -684,10 +661,13 @@ function Modal({ title, onClose, children }: {
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg border border-slate-100 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg border border-slate-100 overflow-hidden">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50/50">
           <h2 className="font-bold text-slate-900 text-base">{title}</h2>
-          <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:bg-slate-200/60 hover:text-slate-700 transition-colors">✕</button>
+          <button onClick={onClose}
+            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:bg-slate-200/60 hover:text-slate-700 transition-colors">
+            ✕
+          </button>
         </div>
         <div className="px-6 py-5">{children}</div>
       </div>
@@ -710,17 +690,12 @@ function ModalActions({ onConfirm, onCancel, saving, disabled, confirmLabel }: {
 }) {
   return (
     <div className="flex gap-3 pt-2">
-      <button
-        onClick={onConfirm}
-        disabled={saving || disabled}
-        className="flex-1 bg-gradient-to-r from-orange-500 to-amber-600 text-white py-2.5 rounded-xl text-sm font-semibold hover:from-orange-600 hover:to-amber-700 disabled:opacity-50 transition-all shadow-sm shadow-orange-500/25"
-      >
+      <button onClick={onConfirm} disabled={saving || disabled}
+        className="flex-1 bg-gradient-to-r from-orange-500 to-amber-600 text-white py-2.5 rounded-xl text-sm font-semibold hover:from-orange-600 hover:to-amber-700 disabled:opacity-50 transition-all shadow-sm shadow-orange-500/25">
         {saving ? 'Salvando...' : confirmLabel}
       </button>
-      <button
-        onClick={onCancel}
-        className="flex-1 bg-slate-100 text-slate-700 py-2.5 rounded-xl text-sm font-semibold hover:bg-slate-200 transition-colors"
-      >
+      <button onClick={onCancel}
+        className="flex-1 bg-slate-100 text-slate-700 py-2.5 rounded-xl text-sm font-semibold hover:bg-slate-200 transition-colors">
         Cancelar
       </button>
     </div>
@@ -738,8 +713,7 @@ function IconBtn({ icon, title, color, onClick }: {
     gray:  'text-slate-400 hover:text-slate-600 hover:bg-slate-100',
   }[color];
   return (
-    <button title={title} onClick={onClick}
-      className={`p-2 rounded-xl transition-colors ${cls}`}>
+    <button title={title} onClick={onClick} className={`p-2 rounded-xl transition-colors ${cls}`}>
       {icon}
     </button>
   );
