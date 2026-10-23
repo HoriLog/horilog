@@ -94,8 +94,13 @@ export const GestaoDevolucaoScreen: React.FC = () => {
       const text = await file.text();
       const r    = await importBeesRoutes(text);
       alert(
-        `Importação concluída com sucesso!\n\nMapas atualizados: ${r.toursUpserted}\nParadas carregadas: ${r.deliveriesUpserted}\nOcorrências identificadas: ${r.devolutionsCreated}`
+        `Importação concluída\\n\n` +
+        'Mapas: ${r.toursUpdated}\n' +
+        'Paradas: ${r.deliveriesUpdated}\n' +
+        'Ocorrências: ${r.devolutionsCreated}\n\n' +
+        'Buffer resolvido automaticamente: ${r.bufferResolved} POCs'
       );
+      
       await refresh();
     } catch (err: any) {
       alert(`Erro na importação: ${err.message}`);

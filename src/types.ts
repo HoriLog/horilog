@@ -401,6 +401,8 @@ export interface BufferEntry {
   status: BufferStatus;
   assigned_tour_id: string | null;
   notes: string | null;
+  sector_code:     string | null;
+  poc_phone: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;

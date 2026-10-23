@@ -1,6 +1,7 @@
 // src/services/importBeesRoutes.ts
 import { parseCsv } from '../utils/csv';
 import { supabase } from './supabaseClient';
+import { logAudit } from './audit';
 import type { TourInsert, DeliveryInsert } from '../types';
 
 function toIso(raw: string | undefined): string | undefined {
@@ -34,22 +35,98 @@ function toIsoDate(raw: string | undefined): string | undefined {
 }
 
 export interface ImportBeesResult {
-  toursUpserted: number;
+  toursUpserted:      number;
   deliveriesUpserted: number;
   devolutionsCreated: number;
-  skipped: number;
-  errors: string[];
+  bufferResolved:     number;   // POCs do buffer fechados automaticamente
+  skipped:            number;
+  errors:             string[];
 }
+
+// ─── Auto-check: cruza buffer com POCs importados ────────────────────────────
+
+async function reconcileBuffer(
+  pocStatusMap: Map<string, string>,   // poc_external_id → status do CSV
+  pocReasonMap: Map<string, string>,   // poc_external_id → motivo do CSV
+  importedBy: string | null
+): Promise<number> {
+  // Busca entradas do buffer que ainda estão em aberto
+  const { data: openEntries, error } = await supabase
+    .from('buffer_entries')
+    .select('id, poc_external_id, status, reason')
+    .in('status', ['PENDING', 'SCHEDULED']);
+
+  if (error || !openEntries?.length) return 0;
+
+  let resolved = 0;
+
+  for (const entry of openEntries) {
+    const pocId = entry.poc_external_id as string | null;
+    if (!pocId) continue;
+
+    const csvStatus = pocStatusMap.get(pocId)?.toUpperCase();
+    if (!csvStatus) continue;
+
+    if (csvStatus === 'CONCLUDED') {
+      // POC foi entregue — fecha o buffer
+      await supabase
+        .from('buffer_entries')
+        .update({ status: 'DELIVERED' })
+        .eq('id', entry.id);
+
+      await logAudit({
+        action:      'UPDATE',
+        resource:    'buffer',
+        resource_id: entry.id,
+        payload:     {
+          from:   entry.status,
+          to:     'DELIVERED',
+          source: 'CSV BEES import',
+          user:   importedBy ?? 'sistema',
+        },
+      });
+
+      resolved++;
+
+    } else if (csvStatus === 'RESCHEDULED') {
+      // Ainda reagendado — atualiza motivo se vier do CSV
+      const csvReason = pocReasonMap.get(pocId);
+      if (csvReason && csvReason !== entry.reason) {
+        await supabase
+          .from('buffer_entries')
+          .update({ reason: csvReason })
+          .eq('id', entry.id);
+
+        await logAudit({
+          action:      'UPDATE',
+          resource:    'buffer',
+          resource_id: entry.id,
+          payload:     {
+            field:  'reason',
+            from:   entry.reason,
+            to:     csvReason,
+            source: 'CSV BEES import',
+          },
+        });
+      }
+    }
+  }
+
+  return resolved;
+}
+
+// ─── Importação principal ─────────────────────────────────────────────────────
 
 export async function importBeesRoutes(
   csvText: string
 ): Promise<ImportBeesResult> {
   const result: ImportBeesResult = {
-    toursUpserted: 0,
+    toursUpserted:      0,
     deliveriesUpserted: 0,
     devolutionsCreated: 0,
-    skipped: 0,
-    errors: [],
+    bufferResolved:     0,
+    skipped:            0,
+    errors:             [],
   };
 
   const { records } = parseCsv(csvText);
@@ -57,6 +134,10 @@ export async function importBeesRoutes(
     result.errors.push('Arquivo vazio ou sem linhas válidas.');
     return result;
   }
+
+  // Mapas para o reconcile do buffer
+  const pocStatusMap = new Map<string, string>();
+  const pocReasonMap = new Map<string, string>();
 
   const tourMap = new Map<
     number,
@@ -67,32 +148,44 @@ export async function importBeesRoutes(
     const extId = toInt(
       row['tourdisplayid'] ?? row['tour_display_id'] ?? row['tourid'] ?? row['Tour ID']
     );
-    if (!extId) {
-      result.skipped++;
-      continue;
+    if (!extId) { result.skipped++; continue; }
+
+    // Alimenta os mapas do buffer
+    const pocId = String(
+      row['pocexternalid'] ?? row['poc_external_id'] ?? row['POC External ID'] ?? ''
+    ).trim();
+    const rowStatus = String(row['status'] ?? row['Status'] ?? '').trim();
+    const rowReason = String(
+      row['lastreasonrescheduled'] ?? row['last_reason_rescheduled'] ??
+      row['skippedreason'] ?? row['skipped_reason'] ?? ''
+    ).trim();
+
+    if (pocId) {
+      pocStatusMap.set(pocId, rowStatus);
+      if (rowReason) pocReasonMap.set(pocId, rowReason);
     }
 
     if (!tourMap.has(extId)) {
       const tourInsert: TourInsert = {
         external_tour_id: extId,
         tour_date:
-          toIsoDate(
-            row['tourdate'] ?? row['tour_date'] ?? row['Tour Date']
-          ) ?? new Date().toISOString().split('T')[0],
+          toIsoDate(row['tourdate'] ?? row['tour_date'] ?? row['Tour Date'])
+          ?? new Date().toISOString().split('T')[0],
         distribution_center_id:
           row['distributioncenterid'] ?? row['distribution_center_id'] ?? null,
-        driver_name: row['drivername'] ?? row['driver_name'] ?? row['Driver Name'] ?? null,
+        driver_name:
+          row['drivername'] ?? row['driver_name'] ?? row['Driver Name'] ?? null,
         vehicle_plate:
-          row['trucklicenseplate'] ?? row['truck_license_plate'] ?? row['Truck License Plate'] ?? null,
+          row['trucklicenseplate'] ?? row['truck_license_plate'] ??
+          row['Truck License Plate'] ?? null,
         trip_start:
-          toIso(row['tripstarttimestamp'] ?? row['trip_start_timestamp']) ??
-          null,
+          toIso(row['tripstarttimestamp'] ?? row['trip_start_timestamp']) ?? null,
         trip_end:
           toIso(row['tripendtimestamp'] ?? row['trip_end_timestamp']) ?? null,
-        status: row['tourstatus'] ?? row['tour_status'] ?? null,
-        is_overnight: false,
-        comments: null,
-        arrived_at_cdd: null,
+        status:             row['tourstatus'] ?? row['tour_status'] ?? null,
+        is_overnight:       false,
+        comments:           null,
+        arrived_at_cdd:     null,
         tml_exceeded_reason: null,
       };
       tourMap.set(extId, { tourInsert, rows: [] });
@@ -100,7 +193,8 @@ export async function importBeesRoutes(
     tourMap.get(extId)!.rows.push(row);
   }
 
-  const tourInserts = Array.from(tourMap.values()).map((t) => t.tourInsert);
+  // ── Upsert tours ──────────────────────────────────────────────────────────
+  const tourInserts = Array.from(tourMap.values()).map(t => t.tourInsert);
 
   const { data: upsertedTours, error: tourError } = await supabase
     .from('tours')
@@ -115,9 +209,10 @@ export async function importBeesRoutes(
   result.toursUpserted = upsertedTours?.length ?? 0;
 
   const tourIdMap = new Map<number, string>(
-    (upsertedTours ?? []).map((t) => [t.external_tour_id as number, t.id as string])
+    (upsertedTours ?? []).map(t => [t.external_tour_id as number, t.id as string])
   );
 
+  // ── Upsert deliveries ─────────────────────────────────────────────────────
   const deliveryInserts: DeliveryInsert[] = [];
 
   for (const [extId, { rows }] of tourMap.entries()) {
@@ -125,69 +220,49 @@ export async function importBeesRoutes(
     if (!tourUuid) continue;
 
     for (const row of rows) {
-      const pocId =
-        row['pocexternalid'] ?? row['poc_external_id'] ?? row['POC External ID'] ?? '';
-      const pocName =
-        row['pocname'] ?? row['poc_name'] ?? row['POC Name'] ?? '';
+      const pocId   = row['pocexternalid'] ?? row['poc_external_id'] ?? row['POC External ID'] ?? '';
+      const pocName = row['pocname']       ?? row['poc_name']        ?? row['POC Name']         ?? '';
 
-      if (!pocName && !pocId) {
-        result.skipped++;
-        continue;
-      }
+      if (!pocName && !pocId) { result.skipped++; continue; }
 
       const rowStatus = String(row['status'] ?? row['Status'] ?? 'PENDING').toUpperCase();
 
       deliveryInserts.push({
-        tour_id: tourUuid,
-        poc_external_id: pocId || null,
-        poc_name: pocName || 'Não informado',
-        critical_poc:
-          toBool(row['criticalpoc'] ?? row['critical_poc']) ?? false,
-        visit_order:
-          toInt(row['visitorder'] ?? row['visit_order']) ?? null,
-        status: rowStatus as DeliveryInsert['status'],
-        delivery_window: null,
-        arrived_at:
-          toIso(row['arrived_at'] ?? row['arrivedat']) ?? null,
-        finished_at:
-          toIso(row['finished_at'] ?? row['finishedat']) ?? null,
+        tour_id:              tourUuid,
+        poc_external_id:      pocId || null,
+        poc_name:             pocName || 'Não informado',
+        critical_poc:         toBool(row['criticalpoc'] ?? row['critical_poc']) ?? false,
+        visit_order:          toInt(row['visitorder']   ?? row['visit_order'])  ?? null,
+        status:               rowStatus as DeliveryInsert['status'],
+        delivery_window:      null,
+        arrived_at:           toIso(row['arrived_at']   ?? row['arrivedat'])    ?? null,
+        finished_at:          toIso(row['finished_at']  ?? row['finishedat'])   ?? null,
         actual_delivery_time_seconds:
-          toInt(
-            row['actualdeliverytime'] ?? row['actual_delivery_time']
-          ) ?? null,
+          toInt(row['actualdeliverytime'] ?? row['actual_delivery_time'])       ?? null,
         within_radius:
-          toBool(row['withinradius'] ?? row['within_radius']) ?? null,
-        out_of_radius_reason:
-          row['skippedreason'] ?? row['skipped_reason'] ?? null,
-        skipped: false,
+          toBool(row['withinradius'] ?? row['within_radius'])                   ?? null,
+        out_of_radius_reason: row['skippedreason'] ?? row['skipped_reason']     ?? null,
+        skipped:              false,
         reschedule_reason:
-          row['lastreasonrescheduled'] ??
-          row['last_reason_rescheduled'] ??
-          null,
+          row['lastreasonrescheduled'] ?? row['last_reason_rescheduled']        ?? null,
         total_delivered_vol_hl:
-          toFloat(
-            row['totaldeliveredvol'] ?? row['total_delivered_vol']
-          ) ?? null,
+          toFloat(row['totaldeliveredvol']  ?? row['total_delivered_vol'])      ?? null,
         total_refused_vol_hl:
-          toFloat(
-            row['totalrefusedvol'] ?? row['total_refused_vol']
-          ) ?? null,
+          toFloat(row['totalrefusedvol']    ?? row['total_refused_vol'])        ?? null,
         total_delivered_weight_kg:
-          toFloat(
-            row['totaldeliveredweightkilograms'] ??
-            row['total_delivered_weight_kilograms']
-          ) ?? null,
+          toFloat(row['totaldeliveredweightkilograms'] ??
+                  row['total_delivered_weight_kilograms'])                      ?? null,
         total_refused_weight_kg:
-          toFloat(
-            row['totalrefusedweightkilograms'] ??
-            row['total_refused_weight_kilograms']
-          ) ?? null,
+          toFloat(row['totalrefusedweightkilograms'] ??
+                  row['total_refused_weight_kilograms'])                        ?? null,
       });
     }
   }
 
   const BATCH = 200;
-  const allDeliveryIds: { id: string; tour_id: string; poc_external_id: string | null; status: string }[] = [];
+  const allDeliveryIds: {
+    id: string; tour_id: string; poc_external_id: string | null; status: string;
+  }[] = [];
 
   for (let i = 0; i < deliveryInserts.length; i += BATCH) {
     const chunk = deliveryInserts.slice(i, i + BATCH);
@@ -205,7 +280,7 @@ export async function importBeesRoutes(
 
   result.deliveriesUpserted = allDeliveryIds.length;
 
-  // ── Inserção direta de ocorrências (sem upsert/onConflict) ──
+  // ── Devoluções (só RESCHEDULED) ───────────────────────────────────────────
   const devolutionInserts: any[] = [];
 
   for (const [extId, { rows }] of tourMap.entries()) {
@@ -213,44 +288,34 @@ export async function importBeesRoutes(
     if (!tourUuid) continue;
 
     for (const row of rows) {
-      // ← só cria devolução para POCs com status RESCHEDULED
       const rowStatus = String(row['status'] ?? row['Status'] ?? '')
-        .toUpperCase()
-        .trim();
+        .toUpperCase().trim();
       if (rowStatus !== 'RESCHEDULED') continue;
 
       const pocId = String(row['pocexternalid'] ?? '').trim();
-
       const reasonCode = String(
-        row['lastreasonrescheduled'] ??
-        row['last_reason_rescheduled'] ??
-        row['skippedreason'] ??
-        row['skipped_reason'] ??
-        row['reason'] ??
-        row['Motivo'] ??
-        '00'
+        row['lastreasonrescheduled'] ?? row['last_reason_rescheduled'] ??
+        row['skippedreason']        ?? row['skipped_reason']           ??
+        row['reason'] ?? row['Motivo'] ?? '00'
       ).trim();
-
       const reasonDesc = String(
-        row['reasondescription'] ??
-        row['reason_description'] ??
+        row['reasondescription'] ?? row['reason_description'] ??
         'Registro de parada importado via BEES'
       );
 
       if (pocId) {
         const matchingDelivery = allDeliveryIds.find(
-          (d) => d.tour_id === tourUuid && d.poc_external_id === pocId
+          d => d.tour_id === tourUuid && d.poc_external_id === pocId
         );
-
         if (matchingDelivery) {
           devolutionInserts.push({
-            delivery_id: matchingDelivery.id,
-            tour_id: tourUuid,
-            poc_external_id: pocId,
-            poc_name: null,
-            reason: reasonCode !== '' ? reasonCode : '00',
+            delivery_id:       matchingDelivery.id,
+            tour_id:           tourUuid,
+            poc_external_id:   pocId,
+            poc_name:          null,
+            reason:            reasonCode !== '' ? reasonCode : '00',
             reason_description: reasonDesc,
-            status: 'PENDING',
+            status:            'PENDING',
           });
         }
       }
@@ -267,14 +332,26 @@ export async function importBeesRoutes(
         .select('id');
 
       if (devError) {
-        console.error('Erro ao inserir lote de devoluções:', devError);
         result.errors.push(`Erro ao criar ocorrências: ${devError.message}`);
       } else {
         totalCreated += devData?.length ?? 0;
       }
     }
   }
-
   result.devolutionsCreated = totalCreated;
+
+  // ── Auto-check buffer ──────────────────────────────────────────────────────
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    result.bufferResolved = await reconcileBuffer(
+      pocStatusMap,
+      pocReasonMap,
+      user?.id ?? null
+    );
+  } catch (e) {
+    // Reconcile nunca deve quebrar a importação
+    console.warn('[Buffer reconcile] Erro silencioso:', e);
+  }
+
   return result;
 }

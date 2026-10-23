@@ -4,6 +4,7 @@ interface AuditPayload {
   action:      'INSERT' | 'UPDATE' | 'DELETE';
   resource:    string;
   resource_id: string;
+  description?: string;
   payload?:    Record<string, unknown>;
 }
 
@@ -24,6 +25,7 @@ export async function logAudit(entry: AuditPayload): Promise<void> {
       action:      entry.action,
       resource:    entry.resource,
       resource_id: entry.resource_id,
+      description:  entry.description ?? null,
       payload:     entry.payload ?? null,
     });
   } catch {

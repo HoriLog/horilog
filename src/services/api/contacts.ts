@@ -18,3 +18,13 @@ export async function fetchContacts(): Promise<Contact[]> {
   if (error) throw error;
   return (data as Contact[]) ?? [];
 }
+
+export interface Contact {
+  id:          string;
+  name:        string;
+  role:        string;
+  department:  string | null;
+  phone:       string;
+  active:      boolean;
+  sector_code: string | null; // ← adicionar esta linha
+}

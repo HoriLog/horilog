@@ -50,7 +50,13 @@ export function useBuffer() {
     payload: Omit<BufferEntry, 'id' | 'created_at' | 'updated_at'>
   ): Promise<void> {
     const created = await createBufferEntry(payload);
-    await logAudit({ action: 'INSERT', resource: 'buffer', resource_id: created.id, payload: { poc_name: payload.poc_name } });
+    await logAudit({
+      action: 'INSERT',
+      resource: 'buffer',
+      resource_id: created.id,
+      description: 'Adicionado ao buffer: $payload.poc_name',
+      payload: {poc_name: payload.poc_name },
+    });
     await load(true); // Fix 3: reload explícito
   }
 
@@ -59,13 +65,30 @@ export function useBuffer() {
     updates: Partial<Pick<BufferEntry, 'scheduled_date' | 'status' | 'reason' | 'notes' | 'volume_hl' | 'assigned_tour_id'>>
   ): Promise<void> {
     await updateBufferEntry(id, updates);
-    await logAudit({ action: 'UPDATE', resource: 'buffer', resource_id: id, payload: updates as Record<string, unknown> });
+    const desc = updates.status === 'DELIVERED' ? 'Marcado como entregue' : 
+                updates.status === 'CANCELLED' ? 'Cancelado' :
+                updates.status === 'SCHEDULED' ? `Agendado para ${updates.scheduled_date}` : 
+                'Atualizado';
+    await logAudit({
+      action: 'UPDATE',
+      resource: 'buffer',
+      resource_id: id,
+      description: desc,
+      payload: updates as Record<string, unknown>,
+    });
+
     await load(true); // Fix 3
   }
 
   async function removeEntry(id: string): Promise<void> {
     await deleteBufferEntry(id);
-    await logAudit({ action: 'DELETE', resource: 'buffer', resource_id: id });
+    await logAudit({
+      action: 'DELETE',
+      resource: 'buffer',
+      resource_id: id,
+      description: 'Removido do buffer',
+    });
+
     await load(true); // Fix 3
   }
 
